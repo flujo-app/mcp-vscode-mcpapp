@@ -63,6 +63,7 @@ jobs:
         if: matrix.target == 'win32-x64'
         shell: pwsh
         run: |
+          npm run npm:prepare-manifest
           $packed = (npm pack --silent | Select-Object -Last 1).Trim()
           if (-not (Test-Path -LiteralPath $packed)) { throw "npm pack did not create $packed" }
           $archive = "mcp-vscode-${{ github.ref_name }}-${{ matrix.target }}.npm.tgz"

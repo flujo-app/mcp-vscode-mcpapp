@@ -12,6 +12,9 @@ const metadata = JSON.parse(await readFile(metadataPath, "utf8"));
 if (packageJson.name !== "@mario.andreschak/mcp-vscode") {
   throw new Error(`Unexpected npm package name: ${JSON.stringify(packageJson.name)}`);
 }
+if (JSON.stringify(packageJson.os) !== JSON.stringify(["win32"]) || JSON.stringify(packageJson.cpu) !== JSON.stringify(["x64"])) {
+  throw new Error("The staged npm manifest must restrict installation to Windows x64");
+}
 if (packageJson.mcpName !== serverJson.name) {
   throw new Error(`package.json mcpName ${JSON.stringify(packageJson.mcpName)} does not match server.json name ${JSON.stringify(serverJson.name)}`);
 }

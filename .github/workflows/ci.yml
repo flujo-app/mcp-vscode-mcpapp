@@ -34,7 +34,9 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run package:standalone -- linux-x64
-      - run: tar -C standalone -czf mcp-vscode-linux-x64.tar.gz mcp-vscode-0.1.0-linux-x64
+      - run: |
+          package_version=$(node -p "require('./package.json').version")
+          tar -C standalone -czf mcp-vscode-linux-x64.tar.gz mcp-vscode-${package_version}-linux-x64
       - uses: actions/upload-artifact@v7
         with:
           name: mcp-vscode-linux-x64
@@ -66,7 +68,9 @@ jobs:
         env:
           MCP_VSCODE_REAL_RUNTIME_ROOT: ${{ github.workspace }}\runtime\openvscode-server
       - shell: pwsh
-        run: Compress-Archive -LiteralPath standalone\mcp-vscode-0.1.0-win32-x64 -DestinationPath mcp-vscode-win32-x64.zip
+        run: |
+          $packageVersion = node -p "require('./package.json').version"
+          Compress-Archive -LiteralPath "standalone\mcp-vscode-$packageVersion-win32-x64" -DestinationPath mcp-vscode-win32-x64.zip
       - uses: actions/upload-artifact@v7
         with:
           name: mcp-vscode-win32-x64

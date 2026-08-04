@@ -4,7 +4,7 @@ MCP VS Code embeds a self-hosted Code OSS/OpenVSCode workbench inside an MCP App
 
 This is not remote control of a separately installed VS Code. The standalone distribution contains the editor server, Node.js runtime, MCP server, bridge extension, and web UI. Microsoft-hosted `vscode.dev` is not used because it disallows framing.
 
-> **Project status:** functional v0.1 implementation. The MCP, filesystem, bridge, terminal, proxy, and UI paths are tested on Windows, Linux, and macOS in CI. The pinned upstream OpenVSCode project currently publishes standalone runtime artifacts for Linux; the prerequisite-free releases target Linux x64 and Linux ARM64.
+> **Project status:** functional v0.1 implementation. Prerequisite-free releases target Windows x64, Linux x64, and Linux ARM64. Linux packages use verified upstream OpenVSCode archives; the Windows package is built in Windows CI from the pinned OpenVSCode source commit and exercised against the real workbench and bridge.
 
 ## How it works
 
@@ -51,13 +51,47 @@ Destructive and open-world tools are annotated accordingly so compatible MCP hos
 
 ## Install a standalone release
 
-Download and extract the release archive for Linux x64 or ARM64, then run:
+Download and extract the release archive for your platform.
+
+Windows x64:
+
+```powershell
+.\bin\mcp-vscode.cmd --stdio --workspace C:\path\to\repository
+```
+
+Linux x64 or ARM64:
 
 ```bash
 ./bin/mcp-vscode --stdio --workspace /absolute/path/to/repository
 ```
 
 The archive contains its own Node.js and OpenVSCode runtimes. It does not require VS Code, Node.js, Docker, or a system-wide package installation.
+
+## Run from npm on Windows
+
+Windows x64 users with Node.js 22 or newer can start the bundled stdio server directly through npm:
+
+```powershell
+npx -y @mario.andreschak/mcp-vscode@0.1.1 --stdio --workspace "C:\path\to\repository"
+```
+
+For MCP clients that configure the workspace through an environment variable:
+
+```json
+{
+  "mcpServers": {
+    "vscode": {
+      "command": "npx",
+      "args": ["-y", "@mario.andreschak/mcp-vscode@0.1.1", "--stdio"],
+      "env": {
+        "MCP_VSCODE_WORKSPACE": "C:\\path\\to\\repository"
+      }
+    }
+  }
+}
+```
+
+The npm package is intentionally restricted to Windows x64. Linux x64 and ARM64 users should use the standalone release archives above.
 
 Example MCP client configuration:
 
@@ -117,10 +151,12 @@ Useful commands:
 npm run dev -- --http --port 3001 --workspace . --ide-url http://127.0.0.1:3999
 npm run dev:mock-ide -- --port 3999
 npm run runtime:fetch -- linux-x64
+npm run runtime:build -- win32-x64
 npm run package:standalone -- linux-x64
+npm run package:standalone -- win32-x64
 ```
 
-The runtime fetcher pins OpenVSCode `1.109.5` and verifies the upstream SHA-256 digest before extraction. Runtime and standalone output directories are ignored by Git.
+The runtime fetcher pins OpenVSCode `1.109.5` and verifies upstream Linux SHA-256 digests before extraction. Native Windows builds pin and verify upstream commit `4ffe2270acdf711bbefecc3e8c79f4b3631640e5`, then invoke Code OSS's `vscode-reh-web-win32-x64` build target. Building that runtime locally requires Windows x64, Git, Node.js 22.21.1 or newer, and the Visual Studio 2022 C++ build tools with `Microsoft.VisualStudio.Component.VC.Runtimes.x86.x64.Spectre`. Release archives contain the resulting runtime and do not require those development tools. Runtime and standalone output directories are ignored by Git.
 
 ## Security model
 

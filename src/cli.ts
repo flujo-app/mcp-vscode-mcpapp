@@ -16,7 +16,7 @@ const parsed = parseArgs({
     https: { type: "boolean", default: false },
     host: { type: "string", default: "127.0.0.1" },
     port: { type: "string", default: "0" },
-    workspace: { type: "string", default: process.cwd() },
+    workspace: { type: "string", default: process.env.MCP_VSCODE_WORKSPACE ?? process.cwd() },
     "public-url": { type: "string" },
     "auth-token": { type: "string" },
     cert: { type: "string" },
@@ -36,6 +36,7 @@ if (parsed.values.help) {
     `  --host <address>        Gateway bind address (default 127.0.0.1)\n` +
     `  --port <number>         Gateway port, 0 chooses a free port\n` +
     `  --workspace <path>      Workspace root exposed to VS Code and MCP tools\n` +
+    `                          (or set MCP_VSCODE_WORKSPACE)\n` +
     `  --public-url <url>      Browser-visible gateway origin for remote deployments\n` +
     `  --auth-token <token>    Bearer token required by the /mcp endpoint\n` +
     `  --cert/--key <path>     PEM TLS certificate and private key\n` +

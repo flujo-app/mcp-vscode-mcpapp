@@ -1,6 +1,7 @@
 {
-  "name": "@flujo/mcp-vscode",
-  "version": "0.1.0",
+  "name": "@mario.andreschak/mcp-vscode",
+  "version": "0.1.1",
+  "mcpName": "io.github.mario-andreschak/mcp-vscode",
   "description": "A self-hosted VS Code workbench embedded as an interactive MCP App.",
   "type": "module",
   "license": "MIT",
@@ -16,12 +17,23 @@
   "engines": {
     "node": ">=22"
   },
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "bin": {
     "mcp-vscode": "dist/cli.js"
   },
   "files": [
     "dist",
     "runtime",
+    "third_party",
+    "server.json",
     "README.md",
     "LICENSE",
     "NOTICE",
@@ -35,10 +47,13 @@
     "typecheck": "tsc --noEmit && tsc -p tsconfig.extension.json --noEmit",
     "test": "tsx --test tests/**/*.test.ts",
     "test:integration": "tsx --test tests-integration/**/*.test.ts",
+    "test:runtime": "tsx --test tests-integration/openvscode-real.test.ts",
     "runtime:fetch": "node scripts/fetch-openvscode.mjs",
+    "runtime:build": "node scripts/build-openvscode-windows.mjs",
+    "npm:verify-runtime": "node scripts/verify-npm-runtime.mjs",
     "package:standalone": "node scripts/package-standalone.mjs",
     "check": "npm run typecheck && npm test && npm run build && npm run test:integration",
-    "prepack": "npm run check"
+    "prepack": "npm run check && npm run npm:verify-runtime"
   },
   "dependencies": {
     "@modelcontextprotocol/ext-apps": "1.7.5",

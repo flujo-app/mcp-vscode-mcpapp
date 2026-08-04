@@ -20,6 +20,12 @@ export interface OpenVscodeStatus {
   basePath?: string;
 }
 
+export interface OpenVscodeLaunch {
+  executable: string;
+  prefixArgs: string[];
+  shell: boolean;
+}
+
 export class OpenVscodeRuntime {
   readonly #core: VscodeCore;
   readonly #workspaceRoot: string;
@@ -31,6 +37,8 @@ export class OpenVscodeRuntime {
   #target?: string;
   #browserUrl?: string;
   #executable?: string;
+  #launchPrefixArgs: string[] = [];
+  #launchShell = false;
   #process?: ChildProcess;
   #error?: string;
   #logs: string[] = [];
@@ -67,7 +75,10 @@ export class OpenVscodeRuntime {
     this.#state = "starting";
     this.#error = undefined;
     try {
-      this.#executable = await this.#findExecutable();
+      const launch = await this.#findLaunch();
+      this.#executable = launch.executable;
+      this.#launchPrefixArgs = launch.prefixArgs;
+      this.#launchShell = launch.shell;
     } catch (error) {
       this.#state = "unavailable";
       this.#error = error instanceof Error ? error.message : String(error);
@@ -100,7 +111,7 @@ export class OpenVscodeRuntime {
       this.#workspaceRoot,
     ];
     const command = this.#executable;
-    this.#process = spawn(command, args, {
+    this.#process = spawn(command, [...this.#launchPrefixArgs, ...args], {
       cwd: this.#workspaceRoot,
       env: {
         ...process.env,
@@ -108,7 +119,7 @@ export class OpenVscodeRuntime {
         MCP_VSCODE_BRIDGE_TOKEN: this.#core.bridgeToken,
       },
       windowsHide: true,
-      shell: process.platform === "win32" && /\.(cmd|bat)$/i.test(command),
+      shell: this.#launchShell,
       stdio: ["ignore", "pipe", "pipe"],
     });
     this.#process.stdout?.on("data", (data: Buffer) => this.#log(data.toString("utf8")));
@@ -155,7 +166,7 @@ export class OpenVscodeRuntime {
     this.#process = undefined;
   }
 
-  async #findExecutable(): Promise<string> {
+  async #findLaunch(): Promise<OpenVscodeLaunch> {
     const moduleDir = path.dirname(fileURLToPath(import.meta.url));
     const roots = [
       this.#configuredRoot,
@@ -164,20 +175,8 @@ export class OpenVscodeRuntime {
       path.resolve(moduleDir, "../runtime/openvscode-server"),
       path.resolve(process.cwd(), "runtime/openvscode-server"),
     ].filter((value): value is string => Boolean(value));
-    const names = process.platform === "win32"
-      ? ["bin/openvscode-server.cmd", "bin/openvscode-server.bat", "bin/openvscode-server"]
-      : ["bin/openvscode-server"];
-    for (const root of roots) {
-      for (const name of names) {
-        const candidate = path.join(root, ...name.split("/"));
-        try {
-          await access(candidate);
-          return candidate;
-        } catch {
-          // Try the next packaged location.
-        }
-      }
-    }
+    const launch = await resolveOpenVscodeLaunch(roots);
+    if (launch) return launch;
     throw new McpVscodeError(
       "Bundled OpenVSCode runtime not found. Run the runtime packaging script or set MCP_VSCODE_OPENVSCODE_ROOT.",
       "OPENVSCODE_RUNTIME_NOT_FOUND",
@@ -217,6 +216,41 @@ export class OpenVscodeRuntime {
       if (this.#logs.length > 200) this.#logs.shift();
       process.stderr.write(`[openvscode] ${line}\n`);
     }
+  }
+}
+
+export async function resolveOpenVscodeLaunch(
+  roots: string[],
+  platform = process.platform,
+): Promise<OpenVscodeLaunch | undefined> {
+  for (const root of roots) {
+    if (platform === "win32") {
+      const node = path.join(root, "node.exe");
+      const serverMain = path.join(root, "out", "server-main.js");
+      if (await filesExist(node, serverMain)) {
+        return { executable: node, prefixArgs: [serverMain], shell: false };
+      }
+      for (const relative of ["bin/openvscode-server.cmd", "bin/openvscode-server.bat", "bin/openvscode-server"]) {
+        const executable = path.join(root, ...relative.split("/"));
+        if (await filesExist(executable)) {
+          return { executable, prefixArgs: [], shell: /\.(cmd|bat)$/i.test(executable) };
+        }
+      }
+      continue;
+    }
+
+    const executable = path.join(root, "bin", "openvscode-server");
+    if (await filesExist(executable)) return { executable, prefixArgs: [], shell: false };
+  }
+  return undefined;
+}
+
+async function filesExist(...files: string[]): Promise<boolean> {
+  try {
+    await Promise.all(files.map((file) => access(file)));
+    return true;
+  } catch {
+    return false;
   }
 }
 

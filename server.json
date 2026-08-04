@@ -1,0 +1,38 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.mario-andreschak/mcp-vscode",
+  "title": "MCP VS Code",
+  "description": "A self-hosted VS Code workbench embedded as an interactive MCP App.",
+  "version": "0.1.1",
+  "repository": {
+    "url": "https://github.com/flujo-app/mcp-vscode-mcpapp",
+    "source": "github"
+  },
+  "packages": [
+    {
+      "registryType": "npm",
+      "registryBaseUrl": "https://registry.npmjs.org",
+      "identifier": "@mario.andreschak/mcp-vscode",
+      "version": "0.1.1",
+      "transport": {
+        "type": "stdio"
+      },
+      "packageArguments": [
+        {
+          "type": "named",
+          "name": "--stdio",
+          "description": "Run the MCP server over standard input and output.",
+          "isRequired": true
+        }
+      ],
+      "environmentVariables": [
+        {
+          "name": "MCP_VSCODE_WORKSPACE",
+          "description": "Absolute path to the Windows workspace exposed through VS Code and MCP tools.",
+          "format": "filepath",
+          "isRequired": true
+        }
+      ]
+    }
+  ]
+}

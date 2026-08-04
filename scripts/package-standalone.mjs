@@ -4,18 +4,24 @@ import process from "node:process";
 import { spawnSync } from "node:child_process";
 
 const target = process.argv[2] ?? `${process.platform}-${process.arch}`;
-if (!target.startsWith("linux-")) throw new Error("Verified standalone packaging currently supports Linux targets only");
+const supportedTargets = new Set(["linux-x64", "linux-arm64", "win32-x64"]);
+if (!supportedTargets.has(target)) {
+  throw new Error(`Verified standalone packaging supports: ${[...supportedTargets].join(", ")}`);
+}
 run(process.execPath, ["scripts/build.mjs"]);
-run(process.execPath, ["scripts/fetch-openvscode.mjs", target]);
+if (target.startsWith("win32-")) run(process.execPath, ["scripts/build-openvscode-windows.mjs", target]);
+else run(process.execPath, ["scripts/fetch-openvscode.mjs", target]);
 
 const root = process.cwd();
+const packageJson = JSON.parse(await readFile(path.join(root, "package.json"), "utf8"));
 const outRoot = path.resolve(root, "standalone");
-const out = path.join(outRoot, `mcp-vscode-0.1.0-${target}`);
+const out = path.join(outRoot, `mcp-vscode-${packageJson.version}-${target}`);
 if (path.dirname(outRoot) !== root) throw new Error(`Unsafe standalone path: ${outRoot}`);
 await rm(out, { recursive: true, force: true });
 await mkdir(path.join(out, "app"), { recursive: true });
 await cp(path.join(root, "dist"), path.join(out, "app", "dist"), { recursive: true });
 await cp(path.join(root, "runtime", "openvscode-server"), path.join(out, "runtime", "openvscode-server"), { recursive: true });
+await cp(path.join(root, "runtime", "openvscode-runtime.json"), path.join(out, "runtime", "openvscode-runtime.json"));
 const runtimePty = path.join(root, "runtime", "openvscode-server", "node_modules", "node-pty");
 await access(path.join(runtimePty, "package.json"));
 await cp(runtimePty, path.join(out, "app", "node_modules", "node-pty"), { recursive: true });
@@ -25,9 +31,14 @@ for (const file of ["LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md", "README.md"])
   await cp(path.join(root, file), path.join(out, file));
 }
 
-const launcher = `#!/usr/bin/env sh\nset -eu\nROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)\nNODE="$ROOT/runtime/openvscode-server/node"\nif [ ! -x "$NODE" ]; then NODE="$ROOT/runtime/openvscode-server/bin/helpers/node"; fi\nexec "$NODE" "$ROOT/app/dist/cli.js" --openvscode-root "$ROOT/runtime/openvscode-server" "$@"\n`;
 await mkdir(path.join(out, "bin"), { recursive: true });
-await writeFile(path.join(out, "bin", "mcp-vscode"), launcher, { mode: 0o755 });
+if (target.startsWith("win32-")) {
+  const launcher = `@echo off\r\nsetlocal\r\nset "ROOT=%~dp0.."\r\nset "NODE=%ROOT%\\runtime\\openvscode-server\\node.exe"\r\nif not exist "%NODE%" (\r\n  echo Bundled Node.js runtime not found: %NODE% 1>&2\r\n  exit /b 1\r\n)\r\n"%NODE%" "%ROOT%\\app\\dist\\cli.js" --openvscode-root "%ROOT%\\runtime\\openvscode-server" %*\r\nexit /b %ERRORLEVEL%\r\n`;
+  await writeFile(path.join(out, "bin", "mcp-vscode.cmd"), launcher);
+} else {
+  const launcher = `#!/usr/bin/env sh\nset -eu\nROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)\nNODE="$ROOT/runtime/openvscode-server/node"\nif [ ! -x "$NODE" ]; then NODE="$ROOT/runtime/openvscode-server/bin/helpers/node"; fi\nexec "$NODE" "$ROOT/app/dist/cli.js" --openvscode-root "$ROOT/runtime/openvscode-server" "$@"\n`;
+  await writeFile(path.join(out, "bin", "mcp-vscode"), launcher, { mode: 0o755 });
+}
 console.log(`Created standalone directory: ${out}`);
 
 function run(command, args) {

@@ -1,0 +1,14 @@
+node_modules/
+/dist/
+/runtime/
+/standalone/
+.mcp-vscode/
+coverage/
+*.log
+*.tgz
+.DS_Store
+Thumbs.db
+.env
+*.pem
+*.key
+*.crt

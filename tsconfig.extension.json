@@ -1,0 +1,11 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "lib": ["ES2023", "DOM", "WebWorker"],
+    "types": ["vscode"]
+  },
+  "include": ["src/bridge-extension/**/*.ts"],
+  "exclude": ["dist", "node_modules"]
+}

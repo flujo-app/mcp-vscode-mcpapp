@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta name="color-scheme" content="dark light" />
+    <title>MCP VS Code</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        font-family: var(--font-sans, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
+        background: #181818;
+        color: #cccccc;
+      }
+      * { box-sizing: border-box; }
+      html, body, #app { width: 100%; height: 100%; min-height: 520px; margin: 0; overflow: hidden; }
+      body { background: var(--color-background-primary, #181818); }
+      .shell { display: grid; grid-template-rows: 38px minmax(0, 1fr) 22px; width: 100%; height: 100%; }
+      .titlebar {
+        display: flex; align-items: center; gap: 9px; padding: 0 8px 0 12px;
+        background: #181818; border-bottom: 1px solid #2b2b2b; user-select: none;
+      }
+      .mark { width: 17px; height: 17px; color: #23a8f2; flex: 0 0 auto; }
+      .title { font-size: 12px; font-weight: 600; color: #dedede; letter-spacing: .01em; }
+      .subtitle { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: #8f8f8f; }
+      .spacer { flex: 1; }
+      button {
+        border: 0; border-radius: 4px; padding: 5px 8px; color: #c9c9c9; background: transparent;
+        font: inherit; font-size: 11px; cursor: pointer;
+      }
+      button:hover { background: #2a2d2e; color: #fff; }
+      button:focus-visible { outline: 1px solid #007fd4; outline-offset: 1px; }
+      .frame-wrap { position: relative; min-height: 0; background: #1e1e1e; }
+      iframe { display: block; width: 100%; height: 100%; border: 0; background: #1e1e1e; }
+      .cover {
+        position: absolute; inset: 0; display: grid; place-items: center; padding: 32px;
+        background: radial-gradient(circle at 50% 30%, #232b34 0, #1e1e1e 38%, #181818 100%);
+      }
+      .cover[hidden] { display: none; }
+      .card { max-width: 540px; text-align: center; }
+      .large-mark { width: 68px; color: #23a8f2; margin: 0 auto 18px; }
+      h1 { margin: 0 0 8px; font-size: 22px; font-weight: 500; color: #f0f0f0; }
+      .message { margin: 0 auto; color: #a9a9a9; font-size: 13px; line-height: 1.5; white-space: pre-wrap; }
+      .details { margin-top: 14px; color: #d7ba7d; font: 11px/1.5 var(--font-mono, Consolas, monospace); }
+      .statusbar {
+        display: flex; align-items: center; gap: 12px; min-width: 0; padding: 0 9px;
+        background: #007acc; color: #fff; font-size: 11px; user-select: none;
+      }
+      .statusbar.error { background: #a1260d; }
+      .status-item { display: inline-flex; align-items: center; gap: 5px; min-width: 0; white-space: nowrap; }
+      .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; opacity: .9; }
+      .right { margin-left: auto; overflow: hidden; text-overflow: ellipsis; }
+      @media (max-width: 620px) { .subtitle { display: none; } .titlebar { padding-left: 8px; } }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script>/*__MCP_VSCODE_APP__*/</script>
+  </body>
+</html>

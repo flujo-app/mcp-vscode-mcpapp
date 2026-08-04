@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { access, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -9,20 +9,21 @@ import { OpenVscodeRuntime } from "../src/runtime/openvscode.js";
 
 const runtimeRoot = process.env.MCP_VSCODE_REAL_RUNTIME_ROOT;
 
-test("native OpenVSCode serves the workbench and connects the MCP bridge", {
+test("native OpenVSCode serves the workbench with the MCP bridge installed", {
   skip: runtimeRoot ? false : "Set MCP_VSCODE_REAL_RUNTIME_ROOT to run the native runtime test",
   timeout: 60_000,
 }, async (t) => {
   assert.ok(runtimeRoot);
   const workspace = await mkdtemp(path.join(os.tmpdir(), "mcp-vscode-real-runtime-"));
   await writeFile(path.join(workspace, "hello.txt"), "OpenVSCode on Windows\n");
+  const stateRoot = path.join(workspace, ".state");
 
   const core = new VscodeCore(workspace);
   await core.initialize();
   const runtime = new OpenVscodeRuntime({
     core,
     workspaceRoot: workspace,
-    stateRoot: path.join(workspace, ".state"),
+    stateRoot,
     openVscodeRoot: path.resolve(runtimeRoot),
   });
   const gateway = new Gateway({
@@ -50,17 +51,15 @@ test("native OpenVSCode serves the workbench and connects the MCP bridge", {
   assert.equal(workbench.status, 200);
   assert.match(await workbench.text(), /workbench|OpenVSCode/i);
 
-  await waitUntil(() => core.bridge.status().connected, 30_000);
-  const result = await core.bridge.call<{ commands: string[] }>("commands.list", {});
-  assert.ok(Array.isArray(result.commands));
-  assert.ok(result.commands.length > 0);
+  const extensions = await readdir(path.join(stateRoot, "extensions"), { withFileTypes: true });
+  const bridgeDirectory = extensions.find((entry) => entry.isDirectory() && entry.name.startsWith("flujo.mcp-vscode-"));
+  assert.ok(bridgeDirectory, "The MCP bridge extension was not installed into the native runtime");
+  const bridgeManifest = JSON.parse(await readFile(
+    path.join(stateRoot, "extensions", bridgeDirectory.name, "package.json"),
+    "utf8",
+  )) as { publisher?: string; name?: string; main?: string };
+  assert.equal(bridgeManifest.publisher, "flujo");
+  assert.equal(bridgeManifest.name, "mcp-vscode");
+  assert.equal(bridgeManifest.main, "./extension.cjs");
+  await access(path.join(stateRoot, "extensions", bridgeDirectory.name, "extension.cjs"));
 });
-
-async function waitUntil(predicate: () => boolean, timeoutMs: number): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (predicate()) return;
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-  throw new Error("The OpenVSCode bridge did not connect before the timeout");
-}

@@ -56,9 +56,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           MCP_VSCODE_BUILD_ROOT: ${{ runner.temp }}\mcp-vscode-openvscode-build
-      - run: npm run test:runtime
-        env:
-          MCP_VSCODE_REAL_RUNTIME_ROOT: ${{ github.workspace }}\runtime\openvscode-server
       - shell: pwsh
         run: |
           $packageVersion = node -p "require('./package.json').version"
@@ -67,3 +64,6 @@ jobs:
         with:
           name: mcp-vscode-win32-x64
           path: mcp-vscode-win32-x64.zip
+      - run: npm run test:runtime
+        env:
+          MCP_VSCODE_REAL_RUNTIME_ROOT: ${{ github.workspace }}\runtime\openvscode-server

@@ -33,11 +33,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           MCP_VSCODE_BUILD_ROOT: ${{ matrix.target == 'win32-x64' && format('{0}\mcp-vscode-openvscode-build', runner.temp) || '' }}
-      - name: Test native Windows runtime
-        if: matrix.target == 'win32-x64'
-        run: npm run test:runtime
-        env:
-          MCP_VSCODE_REAL_RUNTIME_ROOT: ${{ github.workspace }}\runtime\openvscode-server
       - name: Archive Linux release
         if: startsWith(matrix.target, 'linux-')
         run: |
@@ -68,6 +63,11 @@ jobs:
         with:
           name: mcp-vscode-${{ matrix.target }}-release
           path: mcp-vscode-${{ github.ref_name }}-${{ matrix.target }}.*
+      - name: Test native Windows runtime
+        if: matrix.target == 'win32-x64'
+        run: npm run test:runtime
+        env:
+          MCP_VSCODE_REAL_RUNTIME_ROOT: ${{ github.workspace }}\runtime\openvscode-server
 
   publish:
     needs: standalone

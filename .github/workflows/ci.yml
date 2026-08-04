@@ -44,26 +44,18 @@ jobs:
 
   runtime-package-windows:
     runs-on: windows-2022
-    timeout-minutes: 90
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/checkout@v7
-        with:
-          repository: gitpod-io/openvscode-server
-          ref: 4ffe2270acdf711bbefecc3e8c79f4b3631640e5
-          path: _openvscode-source
       - uses: actions/setup-node@v7
         with:
           node-version: 22.21.1
           cache: npm
-          cache-dependency-path: |
-            package-lock.json
-            _openvscode-source/package-lock.json
       - run: npm ci
       - run: npm run package:standalone -- win32-x64
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          MCP_VSCODE_OPENVSCODE_SOURCE: ${{ github.workspace }}\_openvscode-source
+          MCP_VSCODE_BUILD_ROOT: ${{ runner.temp }}\mcp-vscode-openvscode-build
       - run: npm run test:runtime
         env:
           MCP_VSCODE_REAL_RUNTIME_ROOT: ${{ github.workspace }}\runtime\openvscode-server

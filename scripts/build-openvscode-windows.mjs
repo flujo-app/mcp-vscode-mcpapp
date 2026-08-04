@@ -58,6 +58,7 @@ const buildEnv = {
 };
 
 runNpm(["ci"], { cwd: sourceRoot, env: buildEnv });
+await verifyTypeDeclarationIsolation();
 run(process.execPath, ["build/lib/builtInExtensions.ts"], { cwd: sourceRoot, env: buildEnv });
 runNpm(["run", "gulp", `${target.output}-min`], { cwd: sourceRoot, env: buildEnv });
 
@@ -140,6 +141,26 @@ async function verifyBuildToolchain() {
     "Visual Studio 2022 is missing Microsoft.VisualStudio.Component.VC.Runtimes.x86.x64.Spectre, "
       + "which Code OSS requires when compiling native Windows modules",
   );
+}
+
+async function verifyTypeDeclarationIsolation() {
+  let current = sourceRoot;
+  while (true) {
+    const declarationPackage = path.join(current, "node_modules", "@types", "vscode", "package.json");
+    try {
+      await access(declarationPackage);
+      throw new Error(
+        `OpenVSCode source is not isolated: ${declarationPackage} would conflict with its bundled vscode.d.ts. `
+          + "Build from a directory whose parents do not contain @types/vscode.",
+      );
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+    }
+
+    const parent = path.dirname(current);
+    if (parent === current) return;
+    current = parent;
+  }
 }
 
 async function verifyRuntime(root) {

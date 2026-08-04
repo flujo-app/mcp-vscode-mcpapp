@@ -19,15 +19,9 @@ jobs:
           - target: win32-x64
             os: windows-2022
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 90
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/checkout@v7
-        if: matrix.target == 'win32-x64'
-        with:
-          repository: gitpod-io/openvscode-server
-          ref: 4ffe2270acdf711bbefecc3e8c79f4b3631640e5
-          path: _openvscode-source
       - uses: actions/setup-node@v7
         with:
           node-version: ${{ matrix.target == 'win32-x64' && '22.21.1' || '22' }}
@@ -38,7 +32,7 @@ jobs:
       - run: npm run package:standalone -- ${{ matrix.target }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          MCP_VSCODE_OPENVSCODE_SOURCE: ${{ matrix.target == 'win32-x64' && format('{0}\_openvscode-source', github.workspace) || '' }}
+          MCP_VSCODE_BUILD_ROOT: ${{ matrix.target == 'win32-x64' && format('{0}\mcp-vscode-openvscode-build', runner.temp) || '' }}
       - name: Test native Windows runtime
         if: matrix.target == 'win32-x64'
         run: npm run test:runtime

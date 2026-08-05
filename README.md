@@ -1,3 +1,6 @@
+<img width="1064" height="771" alt="image" src="https://github.com/user-attachments/assets/2c0d7676-0a27-4686-a8f7-38ef86b3ff02" />
+
+
 # MCP VS Code
 
 MCP VS Code embeds a self-hosted Code OSS/OpenVSCode workbench inside an MCP App. The model and the human operate the same workspace, open editors, diagnostics, commands, and terminal sessions in real time.

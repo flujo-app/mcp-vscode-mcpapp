@@ -195,7 +195,10 @@ export class OpenVscodeRuntime {
     let source: string | undefined;
     for (const candidate of candidates) {
       try {
-        await access(path.join(candidate, "package.json"));
+        await Promise.all([
+          access(path.join(candidate, "package.json")),
+          access(path.join(candidate, "extension.cjs")),
+        ]);
         source = candidate;
         break;
       } catch {

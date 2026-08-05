@@ -1,6 +1,6 @@
 {
   "name": "@mario.andreschak/mcp-vscode",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "mcpName": "io.github.mario-andreschak/mcp-vscode",
   "description": "A self-hosted VS Code workbench embedded as an interactive MCP App.",
   "type": "module",
@@ -25,7 +25,6 @@
   },
   "files": [
     "dist",
-    "runtime",
     "third_party",
     "server.json",
     "README.md",
@@ -46,6 +45,7 @@
     "runtime:build": "node scripts/build-openvscode-windows.mjs",
     "npm:prepare-manifest": "node scripts/prepare-npm-manifest.mjs",
     "npm:verify-runtime": "node scripts/verify-npm-runtime.mjs",
+    "npm:platform-package": "node scripts/build-platform-packages.mjs",
     "package:standalone": "node scripts/package-standalone.mjs",
     "check": "npm run typecheck && npm test && npm run build && npm run test:integration",
     "prepack": "npm run check && npm run npm:verify-runtime"

@@ -1,22 +1,34 @@
+// Guard the dispatcher tarball just before `npm pack`.
+//
+// Replaces the old Windows-only runtime check: the dispatcher now ships no runtime
+// at all, so what matters is that it stays platform-neutral, that its metadata
+// agrees with server.json, and that it points at the per-platform runtime packages.
 import { access, readFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 
+const PLATFORM_TARGETS = ["win32-x64", "linux-x64", "linux-arm64"];
+
 const projectRoot = path.resolve(process.cwd());
-const runtimeRoot = path.join(projectRoot, "runtime", "openvscode-server");
-const metadataPath = path.join(projectRoot, "runtime", "openvscode-runtime.json");
 const packageJson = JSON.parse(await readFile(path.join(projectRoot, "package.json"), "utf8"));
 const serverJson = JSON.parse(await readFile(path.join(projectRoot, "server.json"), "utf8"));
-const metadata = JSON.parse(await readFile(metadataPath, "utf8"));
 
 if (packageJson.name !== "@mario.andreschak/mcp-vscode") {
   throw new Error(`Unexpected npm package name: ${JSON.stringify(packageJson.name)}`);
 }
-if (JSON.stringify(packageJson.os) !== JSON.stringify(["win32"]) || JSON.stringify(packageJson.cpu) !== JSON.stringify(["x64"])) {
-  throw new Error("The staged npm manifest must restrict installation to Windows x64");
+if (packageJson.os || packageJson.cpu) {
+  throw new Error(
+    `The dispatcher must not declare os/cpu (found os=${JSON.stringify(packageJson.os)}, cpu=${JSON.stringify(packageJson.cpu)}); ` +
+      "those gates belong on the per-platform runtime packages",
+  );
+}
+if (packageJson.files.includes("runtime")) {
+  throw new Error("The dispatcher must not ship `runtime`; the platform packages carry it");
 }
 if (packageJson.mcpName !== serverJson.name) {
-  throw new Error(`package.json mcpName ${JSON.stringify(packageJson.mcpName)} does not match server.json name ${JSON.stringify(serverJson.name)}`);
+  throw new Error(
+    `package.json mcpName ${JSON.stringify(packageJson.mcpName)} does not match server.json name ${JSON.stringify(serverJson.name)}`,
+  );
 }
 if (packageJson.version !== serverJson.version || packageJson.version !== serverJson.packages?.[0]?.version) {
   throw new Error("package.json and server.json versions must match");
@@ -25,19 +37,24 @@ if (packageJson.name !== serverJson.packages?.[0]?.identifier) {
   throw new Error("package.json name and server.json npm identifier must match");
 }
 
-if (metadata.target !== "win32-x64") {
-  throw new Error(
-    `Refusing to pack the Windows npm package with runtime target ${JSON.stringify(metadata.target)}; expected "win32-x64"`,
-  );
+// Every platform must be declared and pinned exactly, otherwise a host silently
+// resolves no runtime and the IDE fails to start after a successful install.
+for (const target of PLATFORM_TARGETS) {
+  const dependency = `${packageJson.name}-${target}`;
+  const declared = packageJson.optionalDependencies?.[dependency];
+  if (declared !== packageJson.version) {
+    throw new Error(
+      `optionalDependencies["${dependency}"] must be pinned to ${packageJson.version}, found ${JSON.stringify(declared)}. ` +
+        "Run `npm run npm:prepare-manifest` before packing.",
+    );
+  }
 }
 
-for (const relativePath of [
-  "node.exe",
-  "bin/openvscode-server.cmd",
-  "out/server-main.js",
-  "node_modules/node-pty/package.json",
-]) {
-  await access(path.join(runtimeRoot, ...relativePath.split("/")));
+for (const relativePath of ["dist/cli.js", "dist/app.html", "dist/bridge-extension/extension.cjs"]) {
+  await access(path.join(projectRoot, ...relativePath.split("/")));
 }
 
-console.log(`Verified ${metadata.target} OpenVSCode runtime for npm packaging`);
+console.log(
+  `Verified platform-neutral dispatcher ${packageJson.name}@${packageJson.version} ` +
+    `(runtime packages: ${PLATFORM_TARGETS.join(", ")})`,
+);

@@ -67,12 +67,16 @@ Linux x64 or ARM64:
 
 The archive contains its own Node.js and OpenVSCode runtimes. It does not require VS Code, Node.js, Docker, or a system-wide package installation.
 
-## Run from npm on Windows
+## Run from npm
 
-Windows x64 users with Node.js 22 or newer can start the bundled stdio server directly through npm:
+With Node.js 22 or newer, `npx` starts the bundled stdio server on Windows x64, Linux x64, and Linux ARM64:
 
 ```powershell
-npx -y @mario.andreschak/mcp-vscode@0.1.6 --stdio --workspace "C:\path\to\repository"
+npx -y @mario.andreschak/mcp-vscode@0.1.7 --stdio --workspace "C:\path\to\repository"
+```
+
+```bash
+npx -y @mario.andreschak/mcp-vscode@0.1.7 --stdio --workspace "/path/to/repository"
 ```
 
 For MCP clients that configure the workspace through an environment variable:
@@ -82,7 +86,7 @@ For MCP clients that configure the workspace through an environment variable:
   "mcpServers": {
     "vscode": {
       "command": "npx",
-      "args": ["-y", "@mario.andreschak/mcp-vscode@0.1.6", "--stdio"],
+      "args": ["-y", "@mario.andreschak/mcp-vscode@0.1.7", "--stdio"],
       "env": {
         "MCP_VSCODE_WORKSPACE": "C:\\path\\to\\repository"
       }
@@ -91,7 +95,7 @@ For MCP clients that configure the workspace through an environment variable:
 }
 ```
 
-The npm package is intentionally restricted to Windows x64. Linux x64 and ARM64 users should use the standalone release archives above.
+`@mario.andreschak/mcp-vscode` itself contains no editor runtime. It declares one `optionalDependencies` entry per supported platform — `@mario.andreschak/mcp-vscode-win32-x64`, `-linux-x64`, and `-linux-arm64` — each gated by `os`/`cpu`, so npm downloads only the OpenVSCode runtime matching the host. macOS is not supported: upstream publishes no darwin server build.
 
 Example MCP client configuration:
 
@@ -154,7 +158,10 @@ npm run runtime:fetch -- linux-x64
 npm run runtime:build -- win32-x64
 npm run package:standalone -- linux-x64
 npm run package:standalone -- win32-x64
+npm run npm:platform-package -- linux-x64
 ```
+
+`npm run npm:platform-package -- <target>` stages the publishable runtime package for one platform in `platform-packages/<target>/`, using whichever runtime is currently installed in `runtime/`. It refuses to run when `runtime/openvscode-runtime.json` reports a different target, so a Linux runtime can never be published under the Windows package. `npm run npm:prepare-manifest` stages the platform-neutral dispatcher manifest that pins those packages, and `npm run npm:verify-runtime` asserts the dispatcher stays free of `os`/`cpu` gates and of the bundled `runtime` directory.
 
 The runtime fetcher pins OpenVSCode `1.109.5` and verifies upstream Linux SHA-256 digests before extraction. Native Windows builds pin and verify upstream commit `4ffe2270acdf711bbefecc3e8c79f4b3631640e5`, then invoke Code OSS's `vscode-reh-web-win32-x64` build target. Building that runtime locally requires Windows x64, Git, Node.js 22.21.1 or newer, and the Visual Studio 2022 C++ build tools with `Microsoft.VisualStudio.Component.VC.Runtimes.x86.x64.Spectre`. Release archives contain the resulting runtime and do not require those development tools. Runtime and standalone output directories are ignored by Git.
 

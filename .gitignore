@@ -2,6 +2,7 @@ node_modules/
 /dist/
 /runtime/
 /standalone/
+/platform-packages/
 .mcp-vscode/
 coverage/
 *.log

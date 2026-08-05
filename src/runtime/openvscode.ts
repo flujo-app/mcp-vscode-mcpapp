@@ -1,11 +1,14 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { access, cp, mkdir } from "node:fs/promises";
+import { createRequire } from "node:module";
 import net from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { McpVscodeError } from "../core/errors.js";
 import type { VscodeCore } from "../core/core.js";
+
+const requireFromHere = createRequire(import.meta.url);
 
 export type OpenVscodeState = "stopped" | "starting" | "ready" | "unavailable" | "failed";
 
@@ -171,6 +174,7 @@ export class OpenVscodeRuntime {
     const roots = [
       this.#configuredRoot,
       process.env.MCP_VSCODE_OPENVSCODE_ROOT,
+      resolvePlatformRuntimeRoot(),
       path.resolve(moduleDir, "../../runtime/openvscode-server"),
       path.resolve(moduleDir, "../runtime/openvscode-server"),
       path.resolve(process.cwd(), "runtime/openvscode-server"),
@@ -178,9 +182,10 @@ export class OpenVscodeRuntime {
     const launch = await resolveOpenVscodeLaunch(roots);
     if (launch) return launch;
     throw new McpVscodeError(
-      "Bundled OpenVSCode runtime not found. Run the runtime packaging script or set MCP_VSCODE_OPENVSCODE_ROOT.",
+      `OpenVSCode runtime not found. Install the runtime package for this platform (${platformRuntimePackage()}) ` +
+        "or set MCP_VSCODE_OPENVSCODE_ROOT.",
       "OPENVSCODE_RUNTIME_NOT_FOUND",
-      { searchedRoots: roots },
+      { searchedRoots: roots, platformPackage: platformRuntimePackage() },
     );
   }
 
@@ -219,6 +224,28 @@ export class OpenVscodeRuntime {
       if (this.#logs.length > 200) this.#logs.shift();
       process.stderr.write(`[openvscode] ${line}\n`);
     }
+  }
+}
+
+/** Name of the optional per-platform package that carries this host's OpenVSCode runtime. */
+export function platformRuntimePackage(platform = process.platform, arch = process.arch): string {
+  return `@mario.andreschak/mcp-vscode-${platform}-${arch}`;
+}
+
+/**
+ * Locate the OpenVSCode runtime shipped by the optional per-platform package.
+ * Returns undefined when that package is not installed, which is the normal case
+ * for standalone bundles and for repository checkouts using a local `runtime/`.
+ */
+export function resolvePlatformRuntimeRoot(
+  platform = process.platform,
+  arch = process.arch,
+): string | undefined {
+  try {
+    const manifest = requireFromHere.resolve(`${platformRuntimePackage(platform, arch)}/package.json`);
+    return path.join(path.dirname(manifest), "runtime", "openvscode-server");
+  } catch {
+    return undefined;
   }
 }
 

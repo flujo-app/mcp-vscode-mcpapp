@@ -48,17 +48,16 @@ jobs:
           Compress-Archive -LiteralPath "standalone\mcp-vscode-$packageVersion-${{ matrix.target }}" -DestinationPath $archive
           $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant()
           Set-Content -LiteralPath "$archive.sha256" -Value "$hash  $archive"
-      - name: Pack Windows npm package
-        if: matrix.target == 'win32-x64'
-        shell: pwsh
+      # Every target now produces an npm runtime package, so `npx` works on all of
+      # them rather than Windows alone.
+      - name: Pack platform npm runtime package
+        shell: bash
         run: |
-          npm run npm:prepare-manifest
-          $packed = (npm pack --silent | Select-Object -Last 1).Trim()
-          if (-not (Test-Path -LiteralPath $packed)) { throw "npm pack did not create $packed" }
-          $archive = "mcp-vscode-${{ github.ref_name }}-${{ matrix.target }}.npm.tgz"
-          Move-Item -LiteralPath $packed -Destination $archive
-          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant()
-          Set-Content -LiteralPath "$archive.sha256" -Value "$hash  $archive"
+          node scripts/build-platform-packages.mjs ${{ matrix.target }}
+          packed=$(cd platform-packages/${{ matrix.target }} && npm pack --silent | tail -n 1)
+          archive="mcp-vscode-${{ github.ref_name }}-${{ matrix.target }}.npm.tgz"
+          mv "platform-packages/${{ matrix.target }}/${packed}" "$archive"
+          node -e "const{createHash}=require('node:crypto'),{readFileSync}=require('node:fs');const a=process.argv[1];const h=createHash('sha256').update(readFileSync(a)).digest('hex');require('node:fs').writeFileSync(a+'.sha256',h+'  '+a+'\n')" "$archive"
       - uses: actions/upload-artifact@v7
         with:
           name: mcp-vscode-${{ matrix.target }}-release
@@ -69,8 +68,32 @@ jobs:
         env:
           MCP_VSCODE_REAL_RUNTIME_ROOT: ${{ github.workspace }}\runtime\openvscode-server
 
+  # The dispatcher carries no runtime, so it builds on Linux in seconds instead of
+  # waiting on the ~1.5h native Windows OpenVSCode build.
+  dispatcher:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: node scripts/verify-release-tag.mjs ${{ github.ref_name }}
+      - run: npm run npm:prepare-manifest
+      - name: Pack dispatcher npm package
+        run: |
+          packed=$(npm pack --silent | tail -n 1)
+          archive="mcp-vscode-${{ github.ref_name }}-dispatcher.npm.tgz"
+          mv "$packed" "$archive"
+          sha256sum "$archive" > "$archive.sha256"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: mcp-vscode-dispatcher-release
+          path: mcp-vscode-${{ github.ref_name }}-dispatcher.*
+
   publish:
-    needs: standalone
+    needs: [standalone, dispatcher]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -84,3 +107,40 @@ jobs:
         with:
           generate_release_notes: true
           files: artifacts/*
+
+  # Publish the platform runtime packages BEFORE the dispatcher: the dispatcher
+  # pins them as optionalDependencies, so releasing it first would leave a window
+  # where `npx` resolves a dispatcher whose runtime packages do not exist yet.
+  publish-npm:
+    needs: [standalone, dispatcher]
+    runs-on: ubuntu-latest
+    environment: npm-publish
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: mcp-vscode-*-release
+          path: artifacts
+          merge-multiple: true
+      - name: Verify artifact checksums
+        working-directory: artifacts
+        run: sha256sum --check *.npm.tgz.sha256
+      - name: Publish platform runtime packages
+        working-directory: artifacts
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          for target in linux-x64 linux-arm64 win32-x64; do
+            npm publish "mcp-vscode-${{ github.ref_name }}-${target}.npm.tgz" --access public
+          done
+      - name: Publish dispatcher package
+        working-directory: artifacts
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish "mcp-vscode-${{ github.ref_name }}-dispatcher.npm.tgz" --access public

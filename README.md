@@ -165,6 +165,24 @@ npm run npm:platform-package -- linux-x64
 
 The runtime fetcher pins OpenVSCode `1.109.5` and verifies upstream Linux SHA-256 digests before extraction. Native Windows builds pin and verify upstream commit `4ffe2270acdf711bbefecc3e8c79f4b3631640e5`, then invoke Code OSS's `vscode-reh-web-win32-x64` build target. Building that runtime locally requires Windows x64, Git, Node.js 22.21.1 or newer, and the Visual Studio 2022 C++ build tools with `Microsoft.VisualStudio.Component.VC.Runtimes.x86.x64.Spectre`. Release archives contain the resulting runtime and do not require those development tools. Runtime and standalone output directories are ignored by Git.
 
+## Publish a release to npm
+
+Release CI publishes automatically once the `NPM_TOKEN` secret and the `npm-publish` environment are configured. To publish by hand instead — for example when the account requires an interactive passkey — download the `*.npm.tgz` assets and their `.sha256` sidecars from the GitHub Release into `release-artifacts-v<version>/`, then run:
+
+```bash
+npm run npm:publish -- release-artifacts-v0.1.7 --dry-run   # verify only, upload nothing
+npm run npm:publish -- release-artifacts-v0.1.7             # publish
+```
+
+Authentication happens in a **second terminal**, because passkey sign-in opens a browser and blocks:
+
+```bash
+npm run npm:login     # browser opens for passkey / WebAuthn
+npm run npm:whoami    # confirm the identity
+```
+
+`npm run npm:publish` verifies every tarball before asking for credentials, then waits for that login to land and continues on its own, so both terminals can be driven side by side. It publishes the three runtime packages before the dispatcher that pins them, skips versions already on the registry so an interrupted run can simply be re-run, and refuses to upload a tarball whose internal `package.json` disagrees with the name and version its filename claims. It never builds a tarball: the published bytes are exactly the audited release artifacts.
+
 ## Security model
 
 - Every file path is resolved beneath one configured workspace root. Existing symlinks are canonicalized before access.

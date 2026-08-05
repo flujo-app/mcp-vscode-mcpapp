@@ -46,6 +46,10 @@
     "npm:prepare-manifest": "node scripts/prepare-npm-manifest.mjs",
     "npm:verify-runtime": "node scripts/verify-npm-runtime.mjs",
     "npm:platform-package": "node scripts/build-platform-packages.mjs",
+    "npm:login": "npm login --auth-type=web --registry=https://registry.npmjs.org",
+    "npm:whoami": "npm whoami --registry=https://registry.npmjs.org",
+    "npm:logout": "npm logout --registry=https://registry.npmjs.org",
+    "npm:publish": "node scripts/publish-npm.mjs",
     "package:standalone": "node scripts/package-standalone.mjs",
     "check": "npm run typecheck && npm test && npm run build && npm run test:integration",
     "prepack": "npm run check && npm run npm:verify-runtime"

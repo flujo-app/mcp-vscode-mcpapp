@@ -1,4 +1,4 @@
-<img width="1064" height="771" alt="image" src="https://github.com/user-attachments/assets/2c0d7676-0a27-4686-a8f7-38ef86b3ff02" />
+<img width="1096" height="597" alt="image" src="https://github.com/user-attachments/assets/f6860467-9957-4fd4-975c-96484c0f6ea8" />
 
 
 # MCP VS Code

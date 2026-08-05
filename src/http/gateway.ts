@@ -33,6 +33,13 @@ export class Gateway {
     this.#proxy.on("proxyRes", (proxyResponse) => {
       delete proxyResponse.headers["x-frame-options"];
       proxyResponse.headers["referrer-policy"] = "no-referrer";
+      // The IDE is embedded in a sandboxed (opaque-origin) MCP-app iframe, so the
+      // workbench's `<script type="module">` and fetch() calls arrive with
+      // `Origin: null` and are CORS-checked. The gateway binds to loopback and
+      // access is already gated by the unguessable base path (+ optional auth
+      // token), so reflecting a wildcard here does not widen exposure.
+      proxyResponse.headers["access-control-allow-origin"] = "*";
+      proxyResponse.headers["cross-origin-resource-policy"] = "cross-origin";
       const csp = proxyResponse.headers["content-security-policy"];
       if (typeof csp === "string") {
         proxyResponse.headers["content-security-policy"] = csp
@@ -112,6 +119,22 @@ export class Gateway {
     app.use((request, response, next) => {
       if (!request.path.startsWith(this.#options.runtime.basePath)) {
         next();
+        return;
+      }
+      // Answer CORS preflights locally: the opaque-origin workbench iframe
+      // preflights any fetch that carries custom headers, and OpenVSCode
+      // itself does not speak CORS.
+      if (request.method === "OPTIONS" && request.headers["access-control-request-method"]) {
+        response.setHeader("access-control-allow-origin", "*");
+        response.setHeader("access-control-allow-methods", "GET,HEAD,POST,PUT,PATCH,DELETE,OPTIONS");
+        response.setHeader(
+          "access-control-allow-headers",
+          typeof request.headers["access-control-request-headers"] === "string"
+            ? request.headers["access-control-request-headers"]
+            : "*",
+        );
+        response.setHeader("access-control-max-age", "86400");
+        response.status(204).end();
         return;
       }
       const target = this.#options.runtime.target;

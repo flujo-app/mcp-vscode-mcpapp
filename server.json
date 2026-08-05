@@ -3,7 +3,7 @@
   "name": "io.github.mario-andreschak/mcp-vscode",
   "title": "MCP VS Code",
   "description": "A self-hosted VS Code workbench embedded as an interactive MCP App.",
-  "version": "0.1.4",
+  "version": "0.1.6",
   "repository": {
     "url": "https://github.com/flujo-app/mcp-vscode-mcpapp",
     "source": "github"
@@ -13,7 +13,7 @@
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@mario.andreschak/mcp-vscode",
-      "version": "0.1.4",
+      "version": "0.1.6",
       "transport": {
         "type": "stdio"
       },
@@ -28,7 +28,7 @@
       "environmentVariables": [
         {
           "name": "MCP_VSCODE_WORKSPACE",
-          "description": "Absolute path to the Windows workspace exposed through VS Code and MCP tools.",
+          "description": "Absolute path to the workspace directory exposed through VS Code and MCP tools.",
           "format": "filepath",
           "isRequired": true
         }

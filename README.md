@@ -72,7 +72,7 @@ The archive contains its own Node.js and OpenVSCode runtimes. It does not requir
 Windows x64 users with Node.js 22 or newer can start the bundled stdio server directly through npm:
 
 ```powershell
-npx -y @mario.andreschak/mcp-vscode@0.1.4 --stdio --workspace "C:\path\to\repository"
+npx -y @mario.andreschak/mcp-vscode@0.1.6 --stdio --workspace "C:\path\to\repository"
 ```
 
 For MCP clients that configure the workspace through an environment variable:
@@ -82,7 +82,7 @@ For MCP clients that configure the workspace through an environment variable:
   "mcpServers": {
     "vscode": {
       "command": "npx",
-      "args": ["-y", "@mario.andreschak/mcp-vscode@0.1.4", "--stdio"],
+      "args": ["-y", "@mario.andreschak/mcp-vscode@0.1.6", "--stdio"],
       "env": {
         "MCP_VSCODE_WORKSPACE": "C:\\path\\to\\repository"
       }

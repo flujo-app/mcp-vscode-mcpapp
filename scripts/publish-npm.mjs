@@ -2,20 +2,24 @@
 //
 // Usage:
 //   npm run npm:publish -- <artifacts-dir> [--dry-run] [--tag <dist-tag>]
+//                          [--wait-for-login] [--no-login]
 //
 // Publishing is deliberately split from packing: this script never builds a
 // tarball, it only verifies and uploads the ones the Release workflow produced.
 // That keeps the published bytes byte-identical to the audited artifacts.
 //
-// Interactive npm auth (passkey / WebAuthn) happens in a SEPARATE terminal via
-// `npm run npm:login`. This script waits for that login to land instead of
-// failing, so the two terminals can be driven side by side.
-import { spawnSync } from "node:child_process";
+// Interactive npm auth (passkey / WebAuthn) runs IN THIS terminal: when no
+// session is present the script hands the terminal to `npm login --auth-type=web`,
+// which opens a browser and returns here once sign-in completes. Pass
+// `--wait-for-login` to keep the old behaviour instead (log in from a second
+// terminal with `npm run npm:login` while this one polls), or `--no-login` to
+// fail fast when no session exists - useful for CI.
 import { createHash } from "node:crypto";
 import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 import { list } from "tar";
+import { npmSpawn } from "./lib/npm-spawn.mjs";
 
 const REGISTRY = "https://registry.npmjs.org";
 // Runtime packages MUST publish before the dispatcher that pins them as
@@ -27,6 +31,9 @@ const LOGIN_TIMEOUT_MS = 15 * 60 * 1000;
 
 const argv = process.argv.slice(2);
 const dryRun = argv.includes("--dry-run");
+// Interactive login in this terminal is the default; these opt out of it.
+const waitForLoginOnly = argv.includes("--wait-for-login");
+const noLogin = argv.includes("--no-login");
 const distTagIndex = argv.indexOf("--tag");
 const distTag = distTagIndex === -1 ? "latest" : argv[distTagIndex + 1];
 if (distTagIndex !== -1 && !distTag) throw new Error("--tag requires a value");
@@ -125,7 +132,7 @@ if (planned.every((entry) => entry.published)) {
   process.exit(0);
 }
 
-if (!dryRun) await waitForLogin();
+if (!dryRun) await ensureLogin();
 
 console.log("");
 for (const entry of planned) {
@@ -137,7 +144,7 @@ for (const entry of planned) {
   }
   console.log(`publishing ${label} ...`);
   const args = ["publish", entry.path, "--access", "public", "--tag", distTag, "--registry", REGISTRY];
-  const result = spawnSync(npmCommand(), args, { stdio: "inherit", cwd: artifactsDir });
+  const result = npmSpawn(args, { stdio: "inherit", cwd: artifactsDir });
   if (result.status !== 0) {
     throw new Error(
       `npm publish failed for ${label}.\n` +
@@ -186,34 +193,83 @@ async function readPackedManifest(file) {
 }
 
 function isPublished(name, wanted) {
-  const result = spawnSync(npmCommand(), ["view", `${name}@${wanted}`, "version", "--registry", REGISTRY], {
+  const result = npmSpawn(["view", `${name}@${wanted}`, "version", "--registry", REGISTRY], {
     encoding: "utf8",
   });
   return result.status === 0 && result.stdout.trim() === wanted;
 }
 
 function currentUser() {
-  const result = spawnSync(npmCommand(), ["whoami", "--registry", REGISTRY], { encoding: "utf8" });
+  const result = npmSpawn(["whoami", "--registry", REGISTRY], { encoding: "utf8" });
   return result.status === 0 ? result.stdout.trim() : undefined;
 }
 
-async function waitForLogin() {
+async function ensureLogin() {
   const existing = currentUser();
   if (existing) {
     console.log(`\nAuthenticated as ${existing}`);
     return;
   }
+  if (noLogin) {
+    throw new Error(
+      `Not logged in to ${REGISTRY} and --no-login was passed.\n` +
+        "Provide a token (NODE_AUTH_TOKEN / .npmrc) or drop --no-login to sign in interactively.",
+    );
+  }
+  if (waitForLoginOnly) {
+    await waitForExternalLogin();
+    return;
+  }
+  if (!process.stdin.isTTY) {
+    console.log("\nNot logged in to npm and this terminal is not interactive; waiting for an external login.");
+    await waitForExternalLogin();
+    return;
+  }
+
+  // Run the interactive login in THIS terminal: `npm login --auth-type=web`
+  // prints a URL, opens the browser for passkey / WebAuthn and returns once the
+  // session is stored, so no second terminal is needed.
   console.log(
     [
       "",
-      "Not logged in to npm.",
+      `Not logged in to ${REGISTRY}. Starting \`npm login --auth-type=web\` here.`,
+      "A browser window opens for passkey / WebAuthn sign-in; publishing resumes",
+      "automatically afterwards. Ctrl-C to abort.",
       "",
-      "  Open a SECOND terminal in this repository and run:",
+    ].join("\n"),
+  );
+  const login = npmSpawn(["login", "--auth-type=web", "--registry", REGISTRY], { stdio: "inherit" });
+  if (login.error) throw new Error(`Could not start npm login: ${login.error.message}`);
+
+  // Trust `npm whoami` rather than the exit code: some npm versions exit
+  // non-zero after a successful web login when the browser closes early.
+  const user = currentUser();
+  if (user) {
+    console.log(`\nAuthenticated as ${user}`);
+    return;
+  }
+  if (login.status !== 0) {
+    throw new Error(
+      `npm login exited with status ${login.status ?? "unknown"} and no session was created.\n` +
+        "Re-run this script to try again, or run `npm run npm:login` manually and then\n" +
+        "re-run with --wait-for-login.",
+    );
+  }
+  throw new Error("npm login finished but `npm whoami` still reports no session. Re-run this script to retry.");
+}
+
+async function waitForExternalLogin() {
+  console.log(
+    [
+      "",
+      "Waiting for an npm login from another terminal.",
+      "",
+      "  In a SECOND terminal in this repository run:",
       "",
       "      npm run npm:login",
       "",
-      "  That opens a browser for passkey / WebAuthn sign-in. This terminal waits",
-      "  and continues automatically once the login completes. Ctrl-C to abort.",
+      "  That opens a browser for passkey / WebAuthn sign-in. This terminal continues",
+      "  automatically once the login lands. Ctrl-C to abort.",
       "",
     ].join("\n"),
   );
@@ -222,7 +278,7 @@ async function waitForLogin() {
     await new Promise((resolve) => setTimeout(resolve, LOGIN_POLL_MS));
     const user = currentUser();
     if (user) {
-      console.log(`Authenticated as ${user}`);
+      console.log(`\nAuthenticated as ${user}`);
       return;
     }
     process.stdout.write(".");
@@ -230,6 +286,3 @@ async function waitForLogin() {
   throw new Error(`Timed out after ${LOGIN_TIMEOUT_MS / 60000} minutes waiting for npm login`);
 }
 
-function npmCommand() {
-  return process.platform === "win32" ? "npm.cmd" : "npm";
-}

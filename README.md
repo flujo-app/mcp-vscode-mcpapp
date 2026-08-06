@@ -177,14 +177,54 @@ npm run npm:publish -- release-artifacts-v0.1.7 --dry-run   # verify only, uploa
 npm run npm:publish -- release-artifacts-v0.1.7             # publish
 ```
 
-Authentication happens in a **second terminal**, because passkey sign-in opens a browser and blocks:
+Authentication happens **in the same terminal**: when no npm session exists, the publish script hands the terminal to `npm login --auth-type=web`, which prints a URL and opens the browser for passkey / WebAuthn sign-in, then resumes publishing once the session is stored. Nothing else is required.
 
 ```bash
-npm run npm:login     # browser opens for passkey / WebAuthn
-npm run npm:whoami    # confirm the identity
+npm run npm:whoami                                          # check the current identity
+npm run npm:login                                            # sign in ahead of time (optional)
+npm run npm:publish:wait -- release-artifacts-v0.1.7         # don't log in here; poll for a login from another terminal
+npm run npm:publish -- release-artifacts-v0.1.7 --no-login   # fail fast when no session exists (CI / token auth)
 ```
 
-`npm run npm:publish` verifies every tarball before asking for credentials, then waits for that login to land and continues on its own, so both terminals can be driven side by side. It publishes the three runtime packages before the dispatcher that pins them, skips versions already on the registry so an interrupted run can simply be re-run, and refuses to upload a tarball whose internal `package.json` disagrees with the name and version its filename claims. It never builds a tarball: the published bytes are exactly the audited release artifacts.
+`npm run npm:publish` verifies every tarball before asking for credentials, so a bad artifact set fails before any browser opens. It publishes the three runtime packages before the dispatcher that pins them, skips versions already on the registry so an interrupted run can simply be re-run, and refuses to upload a tarball whose internal `package.json` disagrees with the name and version its filename claims. It never builds a tarball: the published bytes are exactly the audited release artifacts.
+
+## Publish to the MCP Registry
+
+The [MCP Registry](https://modelcontextprotocol.io/registry/quickstart) stores metadata only, so the npm packages must be live **before** this step:
+
+```bash
+npm run mcp:validate    # check server.json + npm state, download nothing else, publish nothing
+npm run mcp:publish     # log in if needed, then publish server.json
+```
+
+`npm run mcp:publish` (`scripts/publish-mcp.mjs`) works through the quickstart steps in order, and refuses to continue if any of them is off:
+
+- `server.json` and `package.json` must agree — `mcpName` versus `name`, and one shared version across `package.json`, `server.json` and its npm package entry.
+- `@mario.andreschak/mcp-vscode@<version>` must already be on npm, and the **published** package must declare the matching `mcpName`. That mismatch is what produces the registry's "Registry validation failed for package", so it is checked against the registry copy rather than the working tree.
+- With GitHub authentication the server name must start with `io.github.<user>/`, which is verified before a browser opens.
+- The registry JWT that GitHub login mints carries the namespaces it may publish (`io.github.<authorized-account>/*`). That claim is compared with `server.json`'s name **before** the upload, because the device flow silently authorizes whichever account your browser happens to be signed in as — publishing `io.github.mario-andreschak/...` with, say, the `flujo-app` account can only ever return 403, and no amount of re-authenticating fixes it.
+- Versions already listed in the registry are skipped (registry versions are immutable); pass `--force` to attempt the upload anyway.
+- The pinned `mcp-publisher` 1.8.0 binary is downloaded into `.tools/` (git-ignored) and verified against a recorded SHA-256 digest — no Homebrew, `curl | tar` pipeline or Go toolchain needed. Set `MCP_PUBLISHER_BIN` to use your own build.
+- `mcp-publisher validate` runs first, so a malformed `server.json` fails before authentication.
+
+Authentication again happens **in the same terminal**: the GitHub device-code flow prints a URL and a code, and publishing continues automatically once you approve it. A saved registry token is reused while it is still valid (they live only ~5 minutes), and an *expired* token triggers one silent re-login and retry. A *permission* failure never does — it aborts with the authorized identity and its granted namespaces, so the script can no longer appear to hang at `Waiting for authorization...` behind a second device code nobody was told to enter.
+
+To publish as a specific account without fighting the browser session, hand the flow a personal access token (scopes `read:user`, `read:org`):
+
+```powershell
+$env:MCP_GITHUB_TOKEN = "<pat of the namespace owner>"; npm run mcp:publish
+```
+
+```bash
+npm run mcp:publish -- --login github-oidc                       # GitHub Actions OIDC
+npm run mcp:publish -- --login dns --domain example.com --private-key <hex>
+npm run mcp:publish -- --relogin                                 # force a fresh login
+npm run mcp:publish -- --token <github-pat>                       # skip the device flow, publish as that account
+npm run mcp:publish -- --no-login                                # require an existing token, never prompt
+npm run mcp:publish -- --registry http://localhost:8080          # publish against a local registry
+```
+
+Verify a publish with `curl "https://registry.modelcontextprotocol.io/v0.1/servers?search=io.github.mario-andreschak/mcp-vscode"`.
 
 ## Security model
 

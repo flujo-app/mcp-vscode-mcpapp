@@ -3,6 +3,7 @@ node_modules/
 /runtime/
 /standalone/
 /platform-packages/
+/.tools/
 .mcp-vscode/
 coverage/
 *.log
@@ -14,3 +15,4 @@ Thumbs.db
 *.key
 *.crt
 /release-artifacts-v*
+/.tools

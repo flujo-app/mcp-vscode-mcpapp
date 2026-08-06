@@ -50,6 +50,9 @@
     "npm:whoami": "npm whoami --registry=https://registry.npmjs.org",
     "npm:logout": "npm logout --registry=https://registry.npmjs.org",
     "npm:publish": "node scripts/publish-npm.mjs",
+    "npm:publish:wait": "node scripts/publish-npm.mjs --wait-for-login",
+    "mcp:publish": "node scripts/publish-mcp.mjs",
+    "mcp:validate": "node scripts/publish-mcp.mjs --dry-run",
     "package:standalone": "node scripts/package-standalone.mjs",
     "check": "npm run typecheck && npm test && npm run build && npm run test:integration",
     "prepack": "npm run check && npm run npm:verify-runtime"

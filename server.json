@@ -8,6 +8,13 @@
     "url": "https://github.com/flujo-app/mcp-vscode-mcpapp",
     "source": "github"
   },
+  "icons": [
+    {
+      "src": "https://raw.githubusercontent.com/flujo-app/mcp-vscode-mcpapp/main/assets/icon.png",
+      "mimeType": "image/png",
+      "sizes": ["512x512"]
+    }
+  ],
   "packages": [
     {
       "registryType": "npm",

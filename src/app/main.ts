@@ -89,7 +89,7 @@ if (window.__MCP_VSCODE_DEBUG__) {
 async function connectMcpApp(): Promise<void> {
   app = new App(
     { name: "MCP VS Code", version: "0.1.0" },
-    { availableDisplayModes: ["inline", "fullscreen"] },
+    { availableDisplayModes: ["inline", "fullscreen", "pip"] },
   );
   app.ontoolresult = (result) => {
     const payload = result.structuredContent as SessionPayload | undefined;

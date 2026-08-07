@@ -1,4 +1,8 @@
+mcp-vscode-mcpapp in [FLUJO](https://flujo.com.co/)
 <img width="1096" height="597" alt="image" src="https://github.com/user-attachments/assets/f6860467-9957-4fd4-975c-96484c0f6ea8" />
+
+mcp-vscode-mcpapp in Goose
+<img width="1816" height="1080" alt="image" src="https://github.com/user-attachments/assets/07cba92c-48d0-47cc-b1bc-978410156e30" />
 
 
 # MCP VS Code

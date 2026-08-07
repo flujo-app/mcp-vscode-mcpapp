@@ -16,7 +16,7 @@ const parsed = parseArgs({
     https: { type: "boolean", default: false },
     host: { type: "string", default: "127.0.0.1" },
     port: { type: "string", default: "0" },
-    workspace: { type: "string", default: process.env.MCP_VSCODE_WORKSPACE ?? process.cwd() },
+    workspace: { type: "string" },
     "public-url": { type: "string" },
     "auth-token": { type: "string" },
     cert: { type: "string" },
@@ -49,7 +49,12 @@ await main();
 
 async function main(): Promise<void> {
   const values = parsed.values;
-  const workspaceRoot = path.resolve(values.workspace ?? process.cwd());
+  // Precedence is unchanged (--workspace, then MCP_VSCODE_WORKSPACE, then cwd),
+  // but an implicit cwd is now reported: server.json declares the workspace as
+  // required, and silently inheriting the spawner's cwd is how the root ends up
+  // pointing at an unrelated directory such as a mounted volume root.
+  const configuredWorkspace = values.workspace ?? process.env.MCP_VSCODE_WORKSPACE;
+  const workspaceRoot = path.resolve(configuredWorkspace ?? process.cwd());
   const host = values.host ?? "127.0.0.1";
   const port = Number.parseInt(values.port ?? "0", 10);
   if (!Number.isInteger(port) || port < 0 || port > 65_535) throw new Error(`Invalid port: ${values.port}`);
@@ -61,6 +66,13 @@ async function main(): Promise<void> {
   }
   if (!isLoopback(host) && !values.https) {
     throw new Error("Binding beyond loopback requires --https");
+  }
+
+  if (!configuredWorkspace) {
+    process.stderr.write(
+      `[mcp-vscode] No workspace configured; using the current directory: ${workspaceRoot}\n`
+      + `[mcp-vscode] Set MCP_VSCODE_WORKSPACE or pass --workspace to pin the workspace root\n`,
+    );
   }
 
   const core = new VscodeCore(workspaceRoot);

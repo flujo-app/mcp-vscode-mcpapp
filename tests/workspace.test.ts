@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -54,4 +54,41 @@ test("workspace search escapes literal input and sees unsaved overlays", async (
   assert.deepEqual(workspace.overlays(), [{ path: "notes.txt", dirty: true, documentVersion: 2 }]);
   workspace.clearOverlay("notes.txt");
   assert.equal((await workspace.read("notes.txt")).content, "price is $5.00\nplain");
+});
+
+test("workspace listing skips lost+found on volume-root workspaces", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "mcp-vscode-ignores-"));
+  t.after(async () => rm(root, { recursive: true, force: true }));
+  const workspace = new Workspace(root, new CoreEvents());
+  await workspace.initialize();
+  await mkdir(path.join(root, "lost+found"), { recursive: true });
+  await writeFile(path.join(root, "lost+found", "orphan"), "junk");
+  await workspace.write({ path: "keep.txt", content: "kept" });
+
+  const entries = await workspace.list(".", true);
+  assert.deepEqual(entries.map((entry) => entry.path), ["keep.txt"]);
+});
+
+test("watching a root with an unreadable directory does not crash the process", async (t) => {
+  // chmod is a no-op on Windows, and root bypasses the permission bits entirely.
+  if (process.platform === "win32" || process.getuid?.() === 0) {
+    t.skip("requires POSIX permissions and a non-root user");
+    return;
+  }
+  const root = await mkdtemp(path.join(os.tmpdir(), "mcp-vscode-watch-"));
+  const denied = path.join(root, "denied");
+  await mkdir(denied, { recursive: true });
+  await chmod(denied, 0o000);
+  t.after(async () => {
+    await chmod(denied, 0o700).catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const workspace = new Workspace(root, new CoreEvents());
+  await workspace.initialize();
+  await workspace.startWatching();
+  // Give chokidar's initial walk time to reach the unreadable directory; the
+  // regression was an uncaught EACCES emitted asynchronously after this point.
+  await new Promise((resolve) => setTimeout(resolve, 250));
+  await workspace.close();
 });

@@ -14,7 +14,10 @@ import chokidar, { type FSWatcher } from "chokidar";
 import { CoreEvents } from "./events.js";
 import { McpVscodeError } from "./errors.js";
 
-const DEFAULT_IGNORES = new Set([".git", "node_modules", ".mcp-vscode"]);
+// `lost+found` exists at the root of every ext4 volume and is root-owned 0700.
+// When the workspace root is a mounted volume, descending into it raises EACCES
+// for any non-root process, so it is skipped alongside the usual noise.
+const DEFAULT_IGNORES = new Set([".git", "node_modules", ".mcp-vscode", "lost+found"]);
 
 export interface WorkspaceEntry {
   path: string;
@@ -44,6 +47,9 @@ export class Workspace {
     if (this.#watcher) return;
     this.#watcher = chokidar.watch(this.root, {
       ignoreInitial: true,
+      // Unreadable subdirectories must never take the process down: chokidar
+      // rethrows EACCES/EPERM as an unhandled `error` event otherwise.
+      ignorePermissionErrors: true,
       ignored: (candidate) => {
         const relative = path.relative(this.root, candidate);
         return relative.split(path.sep).some((part) => DEFAULT_IGNORES.has(part));
@@ -60,6 +66,16 @@ export class Workspace {
     this.#watcher.on("unlink", (value) => emit("deleted", value));
     this.#watcher.on("addDir", (value) => emit("directory-created", value));
     this.#watcher.on("unlinkDir", (value) => emit("directory-deleted", value));
+    // An FSWatcher is an EventEmitter: without this listener a watch failure is
+    // rethrown as an uncaught exception and kills the server at startup.
+    this.#watcher.on("error", (error) => {
+      const cause = error as NodeJS.ErrnoException;
+      this.#events.emit("workspace.watch-error", {
+        message: cause.message ?? String(error),
+        ...(cause.code ? { code: cause.code } : {}),
+        ...(cause.path ? { path: this.relative(cause.path) } : {}),
+      });
+    });
   }
 
   async close(): Promise<void> {

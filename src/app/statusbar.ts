@@ -7,6 +7,7 @@ const TIER_LABEL: Record<Tier, string> = {
   probing: "Detecting…",
   native: "Native",
   embedded: "Embedded",
+  portable: "Portable",
   browser: "Browser",
 };
 

@@ -35,17 +35,25 @@ if (cliSmoke.status !== 0 || !cliSmoke.stdout.includes("mcp-vscode [options]")) 
 
 const appBuild = await build({
   entryPoints: [path.join(root, "src/app/main.ts")],
+  outfile: path.join(dist, "app-inline.js"),
   bundle: true,
   platform: "browser",
   target: "es2022",
   format: "iife",
   write: false,
   minify: true,
+  loader: {
+    ".ttf": "dataurl",
+  },
 });
 const appTemplate = await readFile(path.join(root, "src/app/index.html"), "utf8");
-const appScript = appBuild.outputFiles[0]?.text;
+const appScript = appBuild.outputFiles.find((file) => file.path.endsWith(".js"))?.text;
 if (!appScript) throw new Error("MCP App bundle produced no JavaScript");
-const appHtml = appTemplate.replace("/*__MCP_VSCODE_APP__*/", () => appScript);
+const appStyles = appBuild.outputFiles.find((file) => file.path.endsWith(".css"))?.text;
+const appTemplateWithStyles = appStyles
+  ? appTemplate.replace("</head>", () => `<style>${appStyles}</style>\n  </head>`)
+  : appTemplate;
+const appHtml = appTemplateWithStyles.replace("/*__MCP_VSCODE_APP__*/", () => appScript);
 if (appHtml.includes("/*__MCP_VSCODE_APP__*/")) {
   throw new Error("MCP App placeholder leaked into the production HTML");
 }

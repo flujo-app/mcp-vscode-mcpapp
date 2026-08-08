@@ -1,16 +1,16 @@
-// MCP App renderer entry point. Replaces the old single-strategy
-// ("always assume the iframe worked") renderer with the three-tier probe
-// from issue #7: native (Monaco/xterm over the gateway's `/ui` socket) ->
-// embedded (iframe against the proxied OpenVSCode workbench, confirmed via a
-// liveness handshake) -> browser (an explicit "open in your browser" card).
+// MCP App renderer entry point. The preferred gateway and iframe surfaces are
+// retained for local/self-hosted deployments, with a host-neutral portable
+// tier (bundled Monaco/xterm over standard MCP Apps tool calls) whenever the
+// gateway is private or framing is unavailable.
 //
 // "Never a blank frame": the loading cover is only ever hidden by a
-// *positive* signal from a committed tier. A 20s global watchdog forces
-// Tier 3 if the probe is still undecided by then, so there is no code path
+// *positive* signal from a committed tier. A 20s global watchdog forces a
+// portable/browser decision if the probe is still undecided, so no code path
 // that can leave the user staring at a permanently blank/loading screen.
 import { App, type McpUiHostContext } from "@modelcontextprotocol/ext-apps";
 import { probeEmbedded, probeNative, uiSocketUrl, type SessionPayload, type Tier, type TierProbeResult } from "./tier.js";
-import { UiTransport, type TransportStatus } from "./transport.js";
+import { AppToolTransport } from "./app-tool-transport.js";
+import { UiTransport, type TransportStatus, type UiClientTransport } from "./transport.js";
 import { Explorer } from "./explorer.js";
 import { NativeEditor, type ActiveEditorContext } from "./editor.js";
 import { NativeTerminal } from "./terminal.js";
@@ -103,7 +103,7 @@ let tierState: Tier = "probing";
 let probeToken = 0;
 let watchdogTimer: number | undefined;
 
-let transport: UiTransport | undefined;
+let transport: UiClientTransport | undefined;
 let explorer: Explorer | undefined;
 let editor: NativeEditor | undefined;
 let terminal: NativeTerminal | undefined;
@@ -117,7 +117,7 @@ let lastHostContext: McpUiHostContext | undefined;
 // wave adds registers its teardown there (§6.6).
 let lastModelContextKey: string | undefined;
 const pushModelContext = createDebouncer(MODEL_CONTEXT_DEBOUNCE_MS, (context: ActiveEditorContext) => {
-  if (!app || tierState !== "native") return;
+  if (!app || (tierState !== "native" && tierState !== "portable")) return;
   const key = JSON.stringify(context);
   if (key === lastModelContextKey) return;
   lastModelContextKey = key;
@@ -222,13 +222,17 @@ function applySession(session: SessionPayload): void {
   workspaceLabel.textContent = session.workspaceRoot ?? "Workspace";
   runtimeStatus.textContent = state;
   origin.textContent = session.gatewayOrigin ?? "";
-  statusBar.setError(state === "failed" || state === "unavailable");
+  const runtimeFailed = state === "failed" || state === "unavailable";
+  // The portable Monaco surface uses workspace/terminal MCP tools directly;
+  // an unavailable OpenVSCode child must not take that independent renderer
+  // down with it.
+  statusBar.setError(runtimeFailed && !app);
   // The "Open in browser" affordance (epic #10 §7-A) must be visible and
-  // usable in EVERY tier, not just the Tier 3 fallback card -- as soon as
+  // usable in gateway/browser tiers, not just the fallback card -- as soon as
   // any workbench URL is known, offer it via `app.openLink()`.
   openInBrowserButton.disabled = !(session.ideUrl ?? session.openVscode?.browserUrl);
 
-  if (state === "unavailable" || state === "failed") {
+  if (runtimeFailed && !app) {
     // The runtime itself never came up: there is nothing to probe yet, so
     // surface the runtime error directly rather than running a tier probe
     // that would only fail for an unrelated reason.
@@ -257,11 +261,22 @@ function applySession(session: SessionPayload): void {
  * is left untouched and still exported/tested independently.
  */
 async function runTierProbeWithLogging(session: SessionPayload, frame: HTMLIFrameElement): Promise<TierProbeResult> {
-  logTier("tier probe starting: checking native tier (ui socket + assets bundle)");
+  logTier("tier probe starting: checking the private /ui socket");
   const nativeOk = await probeNative(session);
   logTier(`native leg result: ${nativeOk ? "reachable" : "not reachable"}`);
   if (nativeOk) {
-    return { tier: "native", reason: "the /ui socket and assets bundle are both reachable" };
+    return { tier: "native", reason: "the private /ui socket is reachable" };
+  }
+
+  // Once the standard MCP Apps connection is initialized, the portable
+  // renderer is both more reliable and more portable than guessing that an
+  // advertised `/ide` URL has a matching reverse proxy. Do not navigate the
+  // hidden iframe (or offer that URL) merely because the server printed one.
+  if (app) {
+    return {
+      tier: "portable",
+      reason: "the private gateway is not reachable; using bundled Monaco over the standard MCP Apps tool channel",
+    };
   }
 
   const ideUrl = session.ideUrl ?? session.openVscode?.browserUrl;
@@ -296,13 +311,13 @@ async function runProbe(session: SessionPayload): Promise<void> {
     if (token !== probeToken || tierState !== "probing") return;
     const reason = "tier probe watchdog (20s) fired before a tier could be committed";
     logTier(reason, "warning");
-    commitTier({ tier: "browser", reason }, session);
+    commitTier({ tier: app ? "portable" : "browser", reason }, session);
   }, PROBE_WATCHDOG_MS);
 
   const result = await runTierProbeWithLogging(session, frame).catch((error): TierProbeResult => {
     const reason = `tier probe threw: ${describeError(error)}`;
     logTier(reason, "error");
-    return { tier: "browser", reason };
+    return { tier: app ? "portable" : "browser", reason };
   });
   if (token !== probeToken) return; // superseded by a newer probe
   commitTier(result, session);
@@ -315,6 +330,7 @@ function commitTier(result: TierProbeResult, session: SessionPayload): void {
   lastCommittedOrigin = session.gatewayOrigin;
   logTier(`committing tier "${result.tier}" — ${result.reason}`);
   statusBar.setTier(result.tier, result.reason);
+  openInBrowserButton.hidden = result.tier === "portable";
   tearDownCurrentTier(result.tier);
 
   if (result.tier === "native") {
@@ -323,6 +339,8 @@ function commitTier(result: TierProbeResult, session: SessionPayload): void {
     nativeShell.hidden = true;
     frame.hidden = false;
     cover.hidden = true; // probeEmbedded already committed the frame src.
+  } else if (result.tier === "portable") {
+    void mountPortable(session);
   } else {
     nativeShell.hidden = true;
     frame.hidden = true;
@@ -331,36 +349,35 @@ function commitTier(result: TierProbeResult, session: SessionPayload): void {
 }
 
 function tearDownCurrentTier(nextTier: Tier): void {
-  if (nextTier !== "native") {
-    transport?.close();
-    transport = undefined;
-    editor?.dispose();
-    editor = undefined;
-    terminal?.dispose();
-    terminal = undefined;
-    explorer = undefined;
-    // Every native-only surface this wave added must be torn down here too
-    // (§6.6): the debounced model-context push and its dedupe key.
-    pushModelContext.cancel();
-    lastModelContextKey = undefined;
-  }
+  // A re-probe may switch between the gateway-backed and portable Monaco
+  // transports while keeping the same visual shell. Always dispose the old
+  // client first so listeners, terminal polling, and models cannot leak.
+  transport?.close();
+  transport = undefined;
+  editor?.dispose();
+  editor = undefined;
+  terminal?.dispose();
+  terminal = undefined;
+  explorer = undefined;
+  pushModelContext.cancel();
+  lastModelContextKey = undefined;
   if (nextTier !== "embedded") {
     frame.src = "about:blank";
   }
 }
 
 async function mountNative(session: SessionPayload): Promise<void> {
-  if (!session.gatewayOrigin || !session.uiToken || !session.assetsUrl) {
-    commitTier({ tier: "browser", reason: "native tier selected but the session payload is incomplete" }, session);
+  if (!session.gatewayOrigin || !session.uiToken) {
+    commitTier({
+      tier: app ? "portable" : "browser",
+      reason: "gateway-backed renderer selected but the session payload is incomplete",
+    }, session);
     return;
   }
-  nativeShell.hidden = false;
-  frame.hidden = true;
-  cover.hidden = true;
-
-  transport = new UiTransport(uiSocketUrl(session.gatewayOrigin, session.uiToken));
-  transport.onStatusChange = (status: TransportStatus) => statusBar.setConnection(status);
-  transport.onGiveUp = () => {
+  const gatewayTransport = new UiTransport(uiSocketUrl(session.gatewayOrigin, session.uiToken));
+  transport = gatewayTransport;
+  gatewayTransport.onStatusChange = (status: TransportStatus) => statusBar.setConnection(status);
+  gatewayTransport.onGiveUp = () => {
     // Three consecutive reconnect failures: assume the gateway restarted
     // (new ephemeral port) or the socket is durably blocked, and re-run the
     // full probe rather than spinning forever in a broken native tier.
@@ -371,12 +388,66 @@ async function mountNative(session: SessionPayload): Promise<void> {
       );
     }
   };
-  transport.connect();
+  gatewayTransport.connect();
 
-  explorer = new Explorer(explorerRoot, transport, {
+  try {
+    await waitForTransportOpen(gatewayTransport);
+    await mountEditorShell(session, gatewayTransport, session.assetsUrl ?? "");
+  } catch (error) {
+    if (app) {
+      commitTier({ tier: "portable", reason: `gateway-backed Monaco failed to mount: ${describeError(error)}` }, session);
+    } else {
+      showError("The editor failed to load.", describeError(error));
+    }
+  }
+}
+
+function waitForTransportOpen(clientTransport: UiClientTransport, timeoutMs = 5_000): Promise<void> {
+  if (clientTransport.isOpen) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    let unsubscribe = (): void => undefined;
+    const timer = window.setTimeout(() => {
+      unsubscribe();
+      reject(new Error("The editor transport did not open in time"));
+    }, timeoutMs);
+    unsubscribe = clientTransport.onOpen(() => {
+      window.clearTimeout(timer);
+      unsubscribe();
+      resolve();
+    });
+  });
+}
+
+async function mountPortable(session: SessionPayload): Promise<void> {
+  if (!app) {
+    commitTier({ tier: "browser", reason: "the host-neutral renderer requires an MCP Apps connection" }, session);
+    return;
+  }
+  const appTransport = new AppToolTransport(app);
+  transport = appTransport;
+  appTransport.onStatusChange = (status: TransportStatus) => statusBar.setConnection(status);
+  appTransport.connect();
+
+  try {
+    await mountEditorShell(session, appTransport, "");
+  } catch (error) {
+    showError("The portable editor failed to load.", describeError(error));
+  }
+}
+
+async function mountEditorShell(
+  session: SessionPayload,
+  clientTransport: UiClientTransport,
+  assetsUrl: string,
+): Promise<void> {
+  nativeShell.hidden = false;
+  frame.hidden = true;
+  cover.hidden = true;
+
+  explorer = new Explorer(explorerRoot, clientTransport, {
     onOpenFile: (path) => void editor?.openFile(path),
   });
-  editor = new NativeEditor(editorContainer, tabsBar, transport, session.assetsUrl, {
+  editor = new NativeEditor(editorContainer, tabsBar, clientTransport, assetsUrl, {
     onDirtyChanged: () => {
       /* tab dot rendering is handled inside NativeEditor itself */
     },
@@ -384,7 +455,7 @@ async function mountNative(session: SessionPayload): Promise<void> {
     onError: (msg) => showTransientError(new Error(msg)),
     onActiveContextChanged: (context) => pushModelContext(context),
   });
-  terminal = new NativeTerminal(terminalContainer, transport, session.assetsUrl, session.workspaceRoot ?? ".");
+  terminal = new NativeTerminal(terminalContainer, clientTransport, assetsUrl, session.workspaceRoot ?? ".");
 
   // Register the server->client `/ui` RPC handlers for the five
   // `editor_*`/`diagnostics_get` MCP tools (epic #10 §7-A item 6 / Phase 3
@@ -392,20 +463,16 @@ async function mountNative(session: SessionPayload): Promise<void> {
   // `src/http/ui-socket.ts`. Closures over `editor` are safe even though
   // it is reassigned just below -- no message can arrive before this
   // synchronous function returns control to the event loop.
-  transport.handle("editor.open", (params) => requireEditor().open(params));
-  transport.handle("editor.state", () => requireEditor().getState());
-  transport.handle("editor.setSelection", (params) => requireEditor().setSelection(params));
-  transport.handle("editor.applyEdits", (params) => requireEditor().applyEdits(params));
-  transport.handle("diagnostics.get", (params) => requireEditor().getDiagnostics(params));
+  clientTransport.handle("editor.open", (params) => requireEditor().open(params));
+  clientTransport.handle("editor.state", () => requireEditor().getState());
+  clientTransport.handle("editor.setSelection", (params) => requireEditor().setSelection(params));
+  clientTransport.handle("editor.applyEdits", (params) => requireEditor().applyEdits(params));
+  clientTransport.handle("diagnostics.get", (params) => requireEditor().getDiagnostics(params));
 
-  try {
-    await editor.mount();
-    await terminal.mount();
-    await explorer.refresh();
-    if (lastHostContext) applyHostTheme(lastHostContext);
-  } catch (error) {
-    showTransientError(error);
-  }
+  await editor.mount();
+  await terminal.mount();
+  await explorer.refresh();
+  if (lastHostContext) applyHostTheme(lastHostContext);
 }
 
 /** Narrow accessor used by the `/ui` handlers registered in `mountNative`
@@ -478,8 +545,7 @@ function showBrowserCard(session: SessionPayload, reason: string): void {
   details.textContent = reason;
 }
 
-/** Shared "Open in your browser" action for both the always-visible
- * titlebar button (all tiers, epic #10 §7-A item 3) and the Tier 3 card's
+/** Shared "Open in your browser" action for both the titlebar button and the browser card's
  * link. Prefers `app.openLink()` -- the host-sanctioned navigation bridge
  * -- and only falls back to a raw `window.open()` in the debug harness
  * (which has no `App` instance at all). */

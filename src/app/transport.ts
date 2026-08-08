@@ -16,6 +16,26 @@ export interface TransportEvent {
 
 export type TransportStatus = "connecting" | "open" | "closed";
 
+/**
+ * Transport contract consumed by the Monaco explorer/editor/terminal shell.
+ *
+ * `UiTransport` implements it over the private gateway WebSocket. The
+ * portable MCP-App renderer implements the same contract over
+ * `App.callServerTool`, so the UI is not coupled to a publicly routable
+ * sidecar port.
+ */
+export interface UiClientTransport {
+  onStatusChange?: (status: TransportStatus) => void;
+  onGiveUp?: () => void;
+  readonly isOpen: boolean;
+  connect(): void;
+  close(): void;
+  call(method: string, params?: unknown, timeoutMs?: number): Promise<unknown>;
+  on(listener: (event: TransportEvent) => void): () => void;
+  onOpen(listener: () => void): () => void;
+  handle(method: string, handler: (params: unknown) => Promise<unknown>): void;
+}
+
 interface RpcErrorPayload {
   code: string;
   message: string;
@@ -33,7 +53,7 @@ const BACKOFF_STEPS_MS = [500, 1_000, 2_000, 4_000, 8_000, 10_000];
 const GIVE_UP_AFTER_FAILURES = 3;
 const DEFAULT_CALL_TIMEOUT_MS = 15_000;
 
-export class UiTransport {
+export class UiTransport implements UiClientTransport {
   readonly #url: string;
   #socket?: WebSocket;
   readonly #pending = new Map<string, { resolve: (value: unknown) => void; reject: (error: unknown) => void }>();

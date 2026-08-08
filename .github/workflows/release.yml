@@ -9,6 +9,7 @@ permissions:
 
 jobs:
   standalone:
+    if: ${{ !contains(github.ref_name, '-') }}
     strategy:
       matrix:
         include:
@@ -93,6 +94,7 @@ jobs:
           path: mcp-vscode-${{ github.ref_name }}-dispatcher.*
 
   publish:
+    if: ${{ !contains(github.ref_name, '-') }}
     needs: [standalone, dispatcher]
     runs-on: ubuntu-latest
     permissions:
@@ -112,6 +114,7 @@ jobs:
   # pins them as optionalDependencies, so releasing it first would leave a window
   # where `npx` resolves a dispatcher whose runtime packages do not exist yet.
   publish-npm:
+    if: ${{ !contains(github.ref_name, '-') }}
     needs: [standalone, dispatcher]
     runs-on: ubuntu-latest
     environment: npm-publish
@@ -123,6 +126,8 @@ jobs:
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org
+      - name: Enable npm trusted publishing
+        run: npm install --global npm@latest
       - uses: actions/download-artifact@v7
         with:
           pattern: mcp-vscode-*-release
@@ -133,14 +138,36 @@ jobs:
         run: sha256sum --check *.npm.tgz.sha256
       - name: Publish platform runtime packages
         working-directory: artifacts
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           for target in linux-x64 linux-arm64 win32-x64; do
-            npm publish "mcp-vscode-${{ github.ref_name }}-${target}.npm.tgz" --access public
+            npm publish "mcp-vscode-${{ github.ref_name }}-${target}.npm.tgz" --access public --provenance
           done
       - name: Publish dispatcher package
         working-directory: artifacts
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npm publish "mcp-vscode-${{ github.ref_name }}-dispatcher.npm.tgz" --access public
+        run: npm publish "mcp-vscode-${{ github.ref_name }}-dispatcher.npm.tgz" --access public --provenance
+
+  # Prereleases reuse the already-published OpenVSCode runtime packages and
+  # publish only the small dispatcher/app layer. This keeps browser fixes
+  # testable in minutes instead of rebuilding an unchanged Windows runtime.
+  publish-npm-prerelease:
+    if: ${{ contains(github.ref_name, '-') }}
+    needs: dispatcher
+    runs-on: ubuntu-latest
+    environment: npm-publish
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - name: Enable npm trusted publishing
+        run: npm install --global npm@latest
+      - uses: actions/download-artifact@v7
+        with:
+          name: mcp-vscode-dispatcher-release
+          path: artifacts
+      - name: Publish prerelease dispatcher
+        working-directory: artifacts
+        run: npm publish "mcp-vscode-${{ github.ref_name }}-dispatcher.npm.tgz" --access public --tag beta --provenance

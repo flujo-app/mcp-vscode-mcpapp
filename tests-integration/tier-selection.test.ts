@@ -146,10 +146,10 @@ const matrix: MatrixRow[] = [
     session: (session) => ({ ...session, openVscode: { state: "starting" }, ideUrl: undefined }),
   },
   {
-    name: "a missing asset manifest falls forward to an alive iframe",
+    name: "a missing sidecar asset manifest does not affect the self-contained native renderer",
     manifest: false,
     frame: "alive",
-    expected: "embedded",
+    expected: "native",
   },
   {
     name: "a rejected UI socket falls forward to an alive iframe",
@@ -214,10 +214,10 @@ const matrix: MatrixRow[] = [
     session: (session) => ({ ...session, uiToken: "incorrect-token" }),
   },
   {
-    name: "the UI socket alone is insufficient when the asset manifest is unavailable",
+    name: "the UI socket is sufficient when bundled assets make the sidecar manifest unavailable",
     manifest: false,
     frame: "blocked",
-    expected: "browser",
+    expected: "native",
   },
   {
     name: "a framing-blocked host still uses native when connect and resource access work",

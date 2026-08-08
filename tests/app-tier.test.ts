@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { uiSocketUrl } from "../src/app/tier.js";
+import { selectTier, uiSocketUrl } from "../src/app/tier.js";
 
 // Pure-function slice of the Phase 2 tier machine (issue #7): the rest of
 // `src/app/tier.ts` needs a DOM (WebSocket/iframe/postMessage) and is
@@ -14,4 +14,10 @@ test("uiSocketUrl derives ws:// from an http:// gateway origin and carries the t
 test("uiSocketUrl derives wss:// from an https:// gateway origin", () => {
   const url = uiSocketUrl("https://example.test", "secret-token");
   assert.equal(url, "wss://example.test/ui?token=secret-token");
+});
+
+test("selectTier falls back to the portable MCP Apps renderer when no gateway URL exists", async () => {
+  const frame = {} as HTMLIFrameElement;
+  const result = await selectTier({}, frame, { portableAvailable: true });
+  assert.equal(result.tier, "portable");
 });

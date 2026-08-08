@@ -3,7 +3,7 @@
 // come back with workspace-root-relative `path`s (see `Workspace#list` in
 // `src/core/workspace.ts`); this module only ever asks for one directory
 // level at a time (`recursive:false`) and expands on click.
-import type { UiTransport } from "./transport.js";
+import type { UiClientTransport } from "./transport.js";
 
 export interface WorkspaceEntry {
   path: string;
@@ -20,11 +20,11 @@ const MAX_ENTRIES_PER_DIRECTORY = 2_000;
 
 export class Explorer {
   readonly #root: HTMLElement;
-  readonly #transport: UiTransport;
+  readonly #transport: UiClientTransport;
   readonly #host: ExplorerHost;
   readonly #expanded = new Map<string, HTMLUListElement>();
 
-  constructor(root: HTMLElement, transport: UiTransport, host: ExplorerHost) {
+  constructor(root: HTMLElement, transport: UiClientTransport, host: ExplorerHost) {
     this.#root = root;
     this.#transport = transport;
     this.#host = host;

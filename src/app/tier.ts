@@ -1,19 +1,23 @@
-// Three-tier renderer selection (issue #7 / #10). Order of preference:
+// Renderer selection (issue #7 / #10). Order of preference:
 //   1. "native"   — Monaco + xterm rendered in this document, talking to the
 //      gateway's authenticated `/ui` WebSocket + `/assets` static bundle.
 //      Works in hosts that strip `frameDomains` (e.g. Claude Desktop today)
 //      because it only needs `connectDomains` + `resourceDomains`.
-//   2. "embedded"  — the existing iframe strategy: `frame.src = ideUrl`,
+//   2. "portable"  — the same Monaco + xterm shell, fully bundled into the
+//      MCP App and backed by standard `ui/call-tool` requests. This tier has
+//      no side HTTP/WebSocket listener and therefore works through any
+//      conforming MCP Apps host.
+//   3. "embedded"  — a legacy/debug iframe strategy: `frame.src = ideUrl`,
 //      confirmed alive via the liveness handshake
-//      (`src/http/inject.ts` / `mcp-vscode:workbench-alive`) rather than the
-//      ambiguous `load`/`error` events (a CSP-blocked frame fires neither).
-//   3. "browser"   — no positive signal from either of the above: render a
+//      (`src/http/inject.ts` / `mcp-vscode:workbench-alive`). A connected MCP
+//      App prefers portable rather than trusting an advertised `/ide` URL.
+//   4. "browser"   — no usable MCP Apps tool channel: render a
 //      "open in your browser" affordance instead of leaving a blank frame.
 //
 // `selectTier` never returns without a decision; callers are expected to
 // apply a hard watchdog on top (see `main.ts`) in case a probe hangs.
 
-export type Tier = "probing" | "native" | "embedded" | "browser";
+export type Tier = "probing" | "native" | "embedded" | "portable" | "browser";
 
 export interface SessionPayload {
   workspaceRoot?: string;
@@ -37,6 +41,7 @@ export interface TierProbeResult {
 export interface TierProbeOptions {
   nativeTimeoutMs?: number;
   embeddedTimeoutMs?: number;
+  portableAvailable?: boolean;
 }
 
 export const DEFAULT_NATIVE_TIMEOUT_MS = 5_000;
@@ -53,19 +58,15 @@ export function uiSocketUrl(gatewayOrigin: string, uiToken: string): string {
   return url.toString();
 }
 
-/** Tier 1 probe: the `/ui` socket must open, and the static asset manifest
- * (used to resolve Monaco/xterm's hashed bundle names) must be fetchable.
- * Both are required for the native renderer to actually mount. */
+/** Tier 1 probe: the private `/ui` socket must open. Monaco and xterm are
+ * bundled into the MCP App itself, so no sidecar asset request is required. */
 export async function probeNative(
   session: SessionPayload,
   timeoutMs = DEFAULT_NATIVE_TIMEOUT_MS,
 ): Promise<boolean> {
-  if (!session.gatewayOrigin || !session.uiToken || !session.assetsUrl) return false;
+  if (!session.gatewayOrigin || !session.uiToken) return false;
   try {
-    await Promise.all([
-      probeSocket(uiSocketUrl(session.gatewayOrigin, session.uiToken), timeoutMs),
-      probeAssets(session.assetsUrl, timeoutMs),
-    ]);
+    await probeSocket(uiSocketUrl(session.gatewayOrigin, session.uiToken), timeoutMs);
     return true;
   } catch {
     return false;
@@ -124,23 +125,9 @@ function probeSocket(url: string, timeoutMs: number): Promise<void> {
   });
 }
 
-async function probeAssets(assetsUrl: string, timeoutMs: number): Promise<void> {
-  const controller = new AbortController();
-  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const response = await fetch(`${assetsUrl.replace(/\/$/, "")}/manifest.json`, {
-      signal: controller.signal,
-      cache: "no-store",
-    });
-    if (!response.ok) throw new Error(`assets manifest fetch failed: HTTP ${response.status}`);
-  } finally {
-    window.clearTimeout(timer);
-  }
-}
-
-/** Tier 2 probe: point the (already-mounted) iframe at `ideUrl` and wait for
+/** Legacy iframe probe: point the (already-mounted) iframe at `ideUrl` and wait for
  * the liveness `postMessage`. Resolves `false` (never rejects) on timeout or
- * frame `error` so the caller can always fall through to Tier 3. */
+ * frame `error` so the caller can always fall through to the browser card. */
 export function probeEmbedded(
   frame: HTMLIFrameElement,
   ideUrl: string,
@@ -185,7 +172,13 @@ export async function selectTier(
   options: TierProbeOptions = {},
 ): Promise<TierProbeResult> {
   if (await probeNative(session, options.nativeTimeoutMs ?? DEFAULT_NATIVE_TIMEOUT_MS)) {
-    return { tier: "native", reason: "the /ui socket and assets bundle are both reachable" };
+    return { tier: "native", reason: "the private /ui socket is reachable" };
+  }
+  if (options.portableAvailable) {
+    return {
+      tier: "portable",
+      reason: "the private gateway is not reachable; using bundled Monaco over the MCP Apps tool channel",
+    };
   }
   const ideUrl = session.ideUrl ?? session.openVscode?.browserUrl;
   if (ideUrl) {

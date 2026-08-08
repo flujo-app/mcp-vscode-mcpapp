@@ -1,11 +1,9 @@
-// Native-tier terminal panel: xterm.js (loaded from the assets bundle) wired
-// to the `/ui` transport's `terminal.*` RPCs and the `terminal.output`/
-// `terminal.exited` core events. Only *types* are imported from
-// "@xterm/xterm" (erased at compile time); the runtime module comes from
-// `loadUiAssets`, same as the editor.
+// Monaco-shell terminal panel: bundled xterm.js wired to either the private
+// `/ui` transport or the standard MCP Apps tool transport. Both provide the
+// same `terminal.*` RPC and `terminal.output`/`terminal.exited` event shape.
 import type { Terminal as XTerm } from "@xterm/xterm";
 import type { FitAddon } from "@xterm/addon-fit";
-import type { UiTransport } from "./transport.js";
+import type { UiClientTransport } from "./transport.js";
 import { loadUiAssets } from "./assets-loader.js";
 import type { HostTokenMap, ThemeMode } from "./theme.js";
 import { buildXtermTheme } from "./theme.js";
@@ -14,7 +12,7 @@ const RESIZE_DEBOUNCE_MS = 100;
 
 export class NativeTerminal {
   readonly #container: HTMLElement;
-  readonly #transport: UiTransport;
+  readonly #transport: UiClientTransport;
   readonly #assetsUrl: string;
   readonly #workspaceRoot: string;
   #terminal?: XTerm;
@@ -26,7 +24,7 @@ export class NativeTerminal {
   #resizeTimer?: number;
   #disabled = false;
 
-  constructor(container: HTMLElement, transport: UiTransport, assetsUrl: string, workspaceRoot: string) {
+  constructor(container: HTMLElement, transport: UiClientTransport, assetsUrl: string, workspaceRoot: string) {
     this.#container = container;
     this.#transport = transport;
     this.#assetsUrl = assetsUrl;

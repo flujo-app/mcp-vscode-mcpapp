@@ -14,6 +14,7 @@ const projectRoot = path.resolve(process.cwd());
 const packagePath = path.join(projectRoot, "package.json");
 const packageJson = JSON.parse(await readFile(packagePath, "utf8"));
 const serverJson = JSON.parse(await readFile(path.join(projectRoot, "server.json"), "utf8"));
+const runtimePackageVersion = packageJson.mcpVscodeRuntimeVersion ?? packageJson.version;
 
 if (packageJson.version !== serverJson.version) {
   throw new Error(
@@ -33,12 +34,12 @@ if (packageJson.files.includes("runtime")) {
 packageJson.optionalDependencies = {
   ...packageJson.optionalDependencies,
   ...Object.fromEntries(
-    PLATFORM_TARGETS.map((target) => [`${packageJson.name}-${target}`, packageJson.version]),
+    PLATFORM_TARGETS.map((target) => [`${packageJson.name}-${target}`, runtimePackageVersion]),
   ),
 };
 
 await writeFile(packagePath, `${JSON.stringify(packageJson, null, 2)}\n`);
 
 console.log(
-  `Staged platform-neutral npm manifest with runtime packages: ${PLATFORM_TARGETS.join(", ")}`,
+  `Staged platform-neutral npm manifest with runtime packages ${runtimePackageVersion}: ${PLATFORM_TARGETS.join(", ")}`,
 );

@@ -1,11 +1,9 @@
 // Native-tier editor: one Monaco model per open file (keyed by
 // workspace-relative path), tabs kept alive across switches, disposed on tab
-// close. Only *types* are imported from "monaco-editor" (erased at compile
-// time) -- the actual runtime module is loaded cross-origin from the
-// gateway's `/assets` bundle via `loadUiAssets`, never bundled into this
-// (IIFE, same-document) `main.ts` bundle.
+// close. The Monaco runtime is supplied by `loadUiAssets`, which is bundled
+// into the same MCP App document so hosted clients need no sidecar asset URL.
 import type * as monaco from "monaco-editor/editor/editor.api.js";
-import type { UiTransport } from "./transport.js";
+import type { UiClientTransport } from "./transport.js";
 import { loadUiAssets } from "./assets-loader.js";
 import { TransportError } from "./transport.js";
 import { McpVscodeError } from "../core/errors.js";
@@ -73,7 +71,7 @@ export interface EditorHost {
 export class NativeEditor {
   readonly #container: HTMLElement;
   readonly #tabsBar: HTMLElement;
-  readonly #transport: UiTransport;
+  readonly #transport: UiClientTransport;
   readonly #host: EditorHost;
   readonly #assetsUrl: string;
   readonly #tabs = new Map<string, OpenTab>();
@@ -83,7 +81,7 @@ export class NativeEditor {
   #unsubscribe?: () => void;
   #unsubscribeSelection?: () => void;
 
-  constructor(container: HTMLElement, tabsBar: HTMLElement, transport: UiTransport, assetsUrl: string, host: EditorHost) {
+  constructor(container: HTMLElement, tabsBar: HTMLElement, transport: UiClientTransport, assetsUrl: string, host: EditorHost) {
     this.#container = container;
     this.#tabsBar = tabsBar;
     this.#transport = transport;

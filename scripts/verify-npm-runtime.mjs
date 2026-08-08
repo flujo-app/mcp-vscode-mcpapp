@@ -12,6 +12,7 @@ const PLATFORM_TARGETS = ["win32-x64", "linux-x64", "linux-arm64"];
 const projectRoot = path.resolve(process.cwd());
 const packageJson = JSON.parse(await readFile(path.join(projectRoot, "package.json"), "utf8"));
 const serverJson = JSON.parse(await readFile(path.join(projectRoot, "server.json"), "utf8"));
+const runtimePackageVersion = packageJson.mcpVscodeRuntimeVersion ?? packageJson.version;
 
 if (packageJson.name !== "@mario.andreschak/mcp-vscode") {
   throw new Error(`Unexpected npm package name: ${JSON.stringify(packageJson.name)}`);
@@ -42,9 +43,9 @@ if (packageJson.name !== serverJson.packages?.[0]?.identifier) {
 for (const target of PLATFORM_TARGETS) {
   const dependency = `${packageJson.name}-${target}`;
   const declared = packageJson.optionalDependencies?.[dependency];
-  if (declared !== packageJson.version) {
+  if (declared !== runtimePackageVersion) {
     throw new Error(
-      `optionalDependencies["${dependency}"] must be pinned to ${packageJson.version}, found ${JSON.stringify(declared)}. ` +
+      `optionalDependencies["${dependency}"] must be pinned to ${runtimePackageVersion}, found ${JSON.stringify(declared)}. ` +
         "Run `npm run npm:prepare-manifest` before packing.",
     );
   }
@@ -56,5 +57,5 @@ for (const relativePath of ["dist/cli.js", "dist/app.html", "dist/bridge-extensi
 
 console.log(
   `Verified platform-neutral dispatcher ${packageJson.name}@${packageJson.version} ` +
-    `(runtime packages: ${PLATFORM_TARGETS.join(", ")})`,
+    `(runtime ${runtimePackageVersion}: ${PLATFORM_TARGETS.join(", ")})`,
 );

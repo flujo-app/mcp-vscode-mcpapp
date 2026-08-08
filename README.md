@@ -30,6 +30,36 @@ flowchart LR
 
 The OpenVSCode process binds only to loopback. A gateway exposes it under a random, high-entropy path, avoiding third-party-cookie authentication inside the MCP sandbox. Remote MCP deployments must use TLS and bearer authentication.
 
+## How the editor renders
+
+MCP VS Code automatically picks the best rendering strategy the host allows, in a fixed order, with **nothing to configure**: no CLI flag, no environment variable, no tool input, and no persisted preference influences the choice. The probe (`src/app/tier.ts`) is driven only by the live `sessionPayload()` (`gatewayOrigin`, `ideUrl`, `uiToken`, `assetsUrl`, `openVscode.state`) and the DOM, re-run for every session.
+
+### The three tiers, in the order they are actually tried
+
+1. **`native` — tried first.** Requires *both* the authenticated `/ui` WebSocket to open *and* the static asset manifest at `/assets/manifest.json` to be fetchable (a 5 s budget). If both succeed, Monaco (editor) and xterm (terminal) render directly inside this document, talking to the gateway over `/ui`. This tier needs only `connectDomains` and `resourceDomains` — it works even in hosts (Claude Desktop, today) that silently drop `frameDomains`, because it never asks to frame anything.
+2. **`embedded` — tried only if `native` fails.** The app points a same-document iframe at the OpenVSCode workbench URL and waits (6 s, extended while the runtime reports `state === "starting"`) for a `postMessage` liveness marker (`mcp-vscode:workbench-alive`) injected into the proxied workbench HTML. A CSP-blocked frame fires neither `load` nor `error`, so only that positive message counts as success; a timeout is treated as "blocked", never as "still loading". On success, the real OpenVSCode workbench is shown in the iframe.
+3. **`browser` — the terminal fallback, always reachable.** If neither of the above committed, the app renders an "open in your browser" card with `app.openLink({ url: ideUrl })`, a selectable URL, and a **Retry** button that re-runs the whole probe from `native`.
+
+**Correction to a common misreading of the underlying issue:** the order is native → embedded → browser, and it is fixed — never reordered or skipped by configuration. In particular, *a host blocking iframe framing does not, by itself, cause `native` to be selected*: `native` is decided first, before framing is ever probed, purely from the `/ui` socket and `/assets` bundle. A host that blocks framing but serves those two lands on `native` regardless of framing. Framing is only probed once `native` has already failed, and blocked framing at that point (with no native surface available) is what produces `browser` — not `native`.
+
+### What each tier can and cannot do
+
+| Capability | `native` | `embedded` | `browser` |
+| --- | --- | --- | --- |
+| Browse the file tree, open/edit/save files | ✅ Monaco over `/ui` (falls back to `callServerTool` if the socket is refused) | ✅ real workbench | ✅ real workbench, separate tab |
+| Terminal | ✅ xterm over `/ui` (degrades to polled reads if the socket is refused) | ✅ | ✅ |
+| Webviews, extension UI (custom panels), Markdown preview | ❌ | ✅ | ✅ |
+
+Webviews, extension UI, and Markdown preview exist **only** in `embedded` and `browser`. Both load the real OpenVSCode workbench, whose webview host relies on a service worker that must be same-origin with the sandbox/browser document it runs inside. `native` renders Monaco/xterm directly in the MCP App's own document, so there is no second same-origin document for that service worker to attach to — this is a structural limit of the tier, not a missing feature, and it is out of scope for this project to change (see issue #10 §9).
+
+### Nothing is configurable
+
+There is no CLI flag, environment variable, tool input, or persisted setting that selects or biases the tier — only the capabilities the host has actually granted (probed live, every session) and the DOM. Re-probing from `native` happens automatically when the gateway origin changes (for example after a restart on a new ephemeral port), when the `/ui` transport gives up after repeated reconnect failures, or when the user presses **Retry** on the `browser` card.
+
+### macOS side benefit
+
+Upstream OpenVSCode Server publishes no `darwin` server build (see "Run from npm" below), so the `embedded` and `browser` tiers — which both need a real OpenVSCode workbench to point at — are unavailable on macOS. Because `native` never depends on OpenVSCode being installed or running (it only needs the gateway's own `/ui` socket and `/assets` bundle, both served directly by the MCP VS Code process), the app still reaches `native` automatically on macOS, with no switch, flag, or workaround required.
+
 ## Gateway HTTP surface
 
 The same HTTP(S) server used for `/mcp` also exposes:

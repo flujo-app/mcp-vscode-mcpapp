@@ -4,6 +4,7 @@ import { spawnSync } from "node:child_process";
 import { cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
+import { gzipSync } from "node:zlib";
 
 const root = process.cwd();
 const dist = path.join(root, "dist");
@@ -50,12 +51,29 @@ const appTemplate = await readFile(path.join(root, "src/app/index.html"), "utf8"
 const appScript = appBuild.outputFiles.find((file) => file.path.endsWith(".js"))?.text;
 if (!appScript) throw new Error("MCP App bundle produced no JavaScript");
 const appStyles = appBuild.outputFiles.find((file) => file.path.endsWith(".css"))?.text;
-const appTemplateWithStyles = appStyles
-  ? appTemplate.replace("</head>", () => `<style>${appStyles}</style>\n  </head>`)
-  : appTemplate;
-const appHtml = appTemplateWithStyles.replace("/*__MCP_VSCODE_APP__*/", () => appScript);
+// FLUJO and other MCP Apps hosts cap a single text resource at 2 MiB. Monaco
+// and xterm are deliberately self-contained so the app works from an opaque
+// sandbox origin, but their minified source is larger than that cap. Gzip the
+// renderer into the HTML and expand it with the browser-native
+// DecompressionStream before executing it. The resource stays a single,
+// host-neutral HTML document and does not need a public asset/proxy route.
+const appPayload = `${
+  appStyles
+    ? `const __mcpVscodeStyles=document.createElement("style");__mcpVscodeStyles.textContent=${JSON.stringify(appStyles)};document.head.appendChild(__mcpVscodeStyles);`
+    : ""
+}\n${appScript}`;
+const appPayloadBase64 = gzipSync(Buffer.from(appPayload), { level: 9 }).toString("base64");
+const appBootstrap = `(()=>{const __fail=(error)=>{const target=document.getElementById("app");if(target)target.textContent="Unable to start MCP VS Code: "+(error&&error.message?error.message:String(error));};(async()=>{if(typeof DecompressionStream!=="function")throw new Error("This browser does not support gzip decompression");const encoded=atob("${appPayloadBase64}");const bytes=Uint8Array.from(encoded,char=>char.charCodeAt(0));const stream=new Blob([bytes]).stream().pipeThrough(new DecompressionStream("gzip"));const source=await new Response(stream).text();const script=document.createElement("script");script.textContent=source;document.body.appendChild(script);})().catch(__fail);})();`;
+const appHtml = appTemplate.replace("/*__MCP_VSCODE_APP__*/", () => appBootstrap);
 if (appHtml.includes("/*__MCP_VSCODE_APP__*/")) {
   throw new Error("MCP App placeholder leaked into the production HTML");
+}
+const appHtmlBytes = Buffer.byteLength(appHtml);
+const mcpAppResourceLimitBytes = 2 * 1024 * 1024;
+if (appHtmlBytes > mcpAppResourceLimitBytes) {
+  throw new Error(
+    `MCP App HTML is ${appHtmlBytes} bytes, exceeding the ${mcpAppResourceLimitBytes}-byte host limit`,
+  );
 }
 await writeFile(path.join(dist, "app.html"), appHtml);
 

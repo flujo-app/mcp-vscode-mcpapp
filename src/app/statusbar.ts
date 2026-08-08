@@ -21,9 +21,14 @@ export class StatusBar {
     this.#connectionBadge = connectionBadge;
   }
 
-  setTier(tier: Tier): void {
+  setTier(tier: Tier, reason?: string): void {
     this.#tierBadge.textContent = TIER_LABEL[tier];
     this.#tierBadge.className = `status-item tier-badge tier-badge--${tier}`;
+    // The `reason` string produced by `selectTier()` (or the equivalent
+    // logging-aware probe in `main.ts`) is surfaced as a tooltip so a
+    // human can see *why* a tier was chosen, not just which one (epic #10
+    // §7-A conformance gap).
+    this.#tierBadge.title = reason ? `${TIER_LABEL[tier]} — ${reason}` : TIER_LABEL[tier];
   }
 
   setConnection(state: "connecting" | "open" | "closed" | "waiting"): void {

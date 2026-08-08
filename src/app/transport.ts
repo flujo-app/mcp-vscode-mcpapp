@@ -31,12 +31,15 @@ export class TransportError extends Error {
 
 const BACKOFF_STEPS_MS = [500, 1_000, 2_000, 4_000, 8_000, 10_000];
 const GIVE_UP_AFTER_FAILURES = 3;
+const DEFAULT_CALL_TIMEOUT_MS = 15_000;
 
 export class UiTransport {
   readonly #url: string;
   #socket?: WebSocket;
   readonly #pending = new Map<string, { resolve: (value: unknown) => void; reject: (error: unknown) => void }>();
   readonly #listeners = new Set<(event: TransportEvent) => void>();
+  readonly #openListeners = new Set<() => void>();
+  readonly #handlers = new Map<string, (params: unknown) => Promise<unknown>>();
   #closed = true;
   #attempt = 0;
   #consecutiveFailures = 0;
@@ -71,14 +74,32 @@ export class UiTransport {
     return this.#socket?.readyState === WebSocket.OPEN;
   }
 
-  call(method: string, params?: unknown): Promise<unknown> {
+  /**
+   * Client-initiated RPC, same framing as before. Now carries its own
+   * timeout (default 15s, mitigating issue #12's "RPC that never resolves"
+   * risk on the client side too -- the server side already has one).
+   */
+  call(method: string, params?: unknown, timeoutMs = DEFAULT_CALL_TIMEOUT_MS): Promise<unknown> {
     const socket = this.#socket;
     if (!socket || socket.readyState !== WebSocket.OPEN) {
       return Promise.reject(new TransportError("NOT_CONNECTED", "The /ui transport is not connected"));
     }
     return new Promise((resolve, reject) => {
       const id = generateId();
-      this.#pending.set(id, { resolve, reject });
+      const timer = window.setTimeout(() => {
+        this.#pending.delete(id);
+        reject(new TransportError("UI_RPC_TIMEOUT", `/ui RPC timed out: ${method}`));
+      }, timeoutMs);
+      this.#pending.set(id, {
+        resolve: (value) => {
+          window.clearTimeout(timer);
+          resolve(value);
+        },
+        reject: (error) => {
+          window.clearTimeout(timer);
+          reject(error);
+        },
+      });
       socket.send(JSON.stringify({ type: "rpc", id, method, params }));
     });
   }
@@ -86,6 +107,23 @@ export class UiTransport {
   on(listener: (event: TransportEvent) => void): () => void {
     this.#listeners.add(listener);
     return () => this.#listeners.delete(listener);
+  }
+
+  /** Registers a handler for a server-initiated RPC method (the additive
+   * `/ui` server->client channel, see `src/http/ui-socket.ts`). Replies are
+   * sent back with the `rpc-result` discriminator so they never collide
+   * with this transport's own outgoing `rpc` requests. */
+  handle(method: string, handler: (params: unknown) => Promise<unknown>): void {
+    this.#handlers.set(method, handler);
+  }
+
+  /** Fires every time the socket transitions to `open`, including on
+   * reconnect (not just the initial connect) -- used by `NativeTerminal`
+   * to re-issue `terminal.attach` for its known session id, since terminal
+   * attachment does not survive a `/ui` reconnect (§6 note 7). */
+  onOpen(listener: () => void): () => void {
+    this.#openListeners.add(listener);
+    return () => this.#openListeners.delete(listener);
   }
 
   #open(): void {
@@ -103,6 +141,7 @@ export class UiTransport {
       this.#attempt = 0;
       this.#consecutiveFailures = 0;
       this.onStatusChange?.("open");
+      for (const listener of this.#openListeners) listener();
     });
     socket.addEventListener("message", (event) => this.#onMessage(event));
     socket.addEventListener("close", () => this.#onClose());
@@ -112,10 +151,27 @@ export class UiTransport {
   }
 
   #onMessage(event: MessageEvent): void {
-    let message: { type?: string; id?: string; result?: unknown; error?: RpcErrorPayload; event?: string; data?: unknown };
+    let message: {
+      type?: string;
+      id?: string;
+      method?: string;
+      params?: unknown;
+      result?: unknown;
+      error?: RpcErrorPayload;
+      event?: string;
+      data?: unknown;
+    };
     try {
       message = JSON.parse(String(event.data));
     } catch {
+      return;
+    }
+    // Server-initiated RPC request (additive; carries `method`, unlike the
+    // legacy reply-to-our-own-call shape below). Answered with
+    // `{ type: "rpc-result", ... }` so it never collides with our own
+    // pending-call bookkeeping.
+    if (message.type === "rpc" && typeof message.id === "string" && typeof message.method === "string") {
+      void this.#dispatchIncoming(message.id, message.method, message.params);
       return;
     }
     if (message.type === "rpc" && typeof message.id === "string") {
@@ -132,6 +188,26 @@ export class UiTransport {
     if (message.type === "event" && typeof message.event === "string") {
       for (const listener of this.#listeners) listener({ event: message.event, data: message.data });
     }
+  }
+
+  async #dispatchIncoming(id: string, method: string, params: unknown): Promise<void> {
+    const handler = this.#handlers.get(method);
+    if (!handler) {
+      this.#sendResult(id, undefined, { code: "METHOD_NOT_FOUND", message: `Unknown /ui method: ${method}` });
+      return;
+    }
+    try {
+      const result = await handler(params);
+      this.#sendResult(id, result);
+    } catch (error) {
+      this.#sendResult(id, undefined, serializeHandlerError(error));
+    }
+  }
+
+  #sendResult(id: string, result?: unknown, error?: RpcErrorPayload): void {
+    const socket = this.#socket;
+    if (!socket || socket.readyState !== WebSocket.OPEN) return;
+    socket.send(JSON.stringify(error ? { type: "rpc-result", id, error } : { type: "rpc-result", id, result }));
   }
 
   #onClose(): void {
@@ -158,6 +234,14 @@ export class UiTransport {
     if (this.#reconnectTimer !== undefined) window.clearTimeout(this.#reconnectTimer);
     this.#reconnectTimer = window.setTimeout(() => this.#open(), jittered);
   }
+}
+
+function serializeHandlerError(error: unknown): RpcErrorPayload {
+  if (error && typeof error === "object" && "code" in error && typeof (error as { code: unknown }).code === "string") {
+    const err = error as { code: string; message?: string; details?: unknown };
+    return { code: err.code, message: err.message ?? String(error), details: err.details };
+  }
+  return { code: "INTERNAL_ERROR", message: error instanceof Error ? error.message : String(error) };
 }
 
 function generateId(): string {

@@ -11,7 +11,7 @@ MCP VS Code embeds a self-hosted Code OSS/OpenVSCode workbench inside an MCP App
 
 This is not remote control of a separately installed VS Code. The standalone distribution contains the editor server, Node.js runtime, MCP server, bridge extension, and web UI. Microsoft-hosted `vscode.dev` is not used because it disallows framing.
 
-> **Project status:** functional v0.1 implementation. Prerequisite-free releases target Windows x64, Linux x64, and Linux ARM64. Linux packages use verified upstream OpenVSCode archives; the Windows package is built in Windows CI from the pinned OpenVSCode source commit and exercised against the real workbench and bridge.
+> **Project status:** functional v0.2 implementation. Prerequisite-free releases target Windows x64, Linux x64, and Linux ARM64. Linux packages use verified upstream OpenVSCode archives; the Windows package is built in Windows CI from the pinned OpenVSCode source commit and exercised against the real workbench and bridge.
 
 ## How it works
 
@@ -126,11 +126,11 @@ The archive contains its own Node.js and OpenVSCode runtimes. It does not requir
 With Node.js 22 or newer, `npx` starts the bundled stdio server on Windows x64, Linux x64, and Linux ARM64:
 
 ```powershell
-npx -y @mario.andreschak/mcp-vscode@0.1.8 --stdio --workspace "C:\path\to\repository"
+npx -y @mario.andreschak/mcp-vscode@0.2.0 --stdio --workspace "C:\path\to\repository"
 ```
 
 ```bash
-npx -y @mario.andreschak/mcp-vscode@0.1.8 --stdio --workspace "/path/to/repository"
+npx -y @mario.andreschak/mcp-vscode@0.2.0 --stdio --workspace "/path/to/repository"
 ```
 
 For MCP clients that configure the workspace through an environment variable:
@@ -140,7 +140,7 @@ For MCP clients that configure the workspace through an environment variable:
   "mcpServers": {
     "vscode": {
       "command": "npx",
-      "args": ["-y", "@mario.andreschak/mcp-vscode@0.1.8", "--stdio"],
+      "args": ["-y", "@mario.andreschak/mcp-vscode@0.2.0", "--stdio"],
       "env": {
         "MCP_VSCODE_WORKSPACE": "C:\\path\\to\\repository"
       }
@@ -226,8 +226,8 @@ The runtime fetcher pins OpenVSCode `1.109.5` and verifies upstream Linux SHA-25
 Release CI publishes automatically once the `NPM_TOKEN` secret and the `npm-publish` environment are configured. To publish by hand instead — for example when the account requires an interactive passkey — download the `*.npm.tgz` assets and their `.sha256` sidecars from the GitHub Release into `release-artifacts-v<version>/`, then run:
 
 ```bash
-npm run npm:publish -- release-artifacts-v0.1.8 --dry-run   # verify only, upload nothing
-npm run npm:publish -- release-artifacts-v0.1.8             # publish
+npm run npm:publish -- release-artifacts-v0.2.0 --dry-run   # verify only, upload nothing
+npm run npm:publish -- release-artifacts-v0.2.0             # publish
 ```
 
 Authentication happens **in the same terminal**: when no npm session exists, the publish script hands the terminal to `npm login --auth-type=web`, which prints a URL and opens the browser for passkey / WebAuthn sign-in, then resumes publishing once the session is stored. Nothing else is required.
@@ -235,8 +235,8 @@ Authentication happens **in the same terminal**: when no npm session exists, the
 ```bash
 npm run npm:whoami                                          # check the current identity
 npm run npm:login                                            # sign in ahead of time (optional)
-npm run npm:publish:wait -- release-artifacts-v0.1.8         # don't log in here; poll for a login from another terminal
-npm run npm:publish -- release-artifacts-v0.1.8 --no-login   # fail fast when no session exists (CI / token auth)
+npm run npm:publish:wait -- release-artifacts-v0.2.0         # don't log in here; poll for a login from another terminal
+npm run npm:publish -- release-artifacts-v0.2.0 --no-login   # fail fast when no session exists (CI / token auth)
 ```
 
 `npm run npm:publish` verifies every tarball before asking for credentials, so a bad artifact set fails before any browser opens. It publishes the three runtime packages before the dispatcher that pins them, skips versions already on the registry so an interrupted run can simply be re-run, and refuses to upload a tarball whose internal `package.json` disagrees with the name and version its filename claims. It never builds a tarball: the published bytes are exactly the audited release artifacts.

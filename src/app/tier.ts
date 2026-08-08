@@ -34,6 +34,11 @@ export interface TierProbeResult {
   reason: string;
 }
 
+export interface TierProbeOptions {
+  nativeTimeoutMs?: number;
+  embeddedTimeoutMs?: number;
+}
+
 export const DEFAULT_NATIVE_TIMEOUT_MS = 5_000;
 export const DEFAULT_EMBEDDED_TIMEOUT_MS = 6_000;
 export const LIVENESS_MARKER = "mcp-vscode:workbench-alive";
@@ -70,30 +75,49 @@ export async function probeNative(
 function probeSocket(url: string, timeoutMs: number): Promise<void> {
   return new Promise((resolve, reject) => {
     let socket: WebSocket;
+    let opened = false;
+    let settled = false;
     try {
       socket = new WebSocket(url);
     } catch (error) {
       reject(error);
       return;
     }
+    const finish = (error?: Error): void => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timer);
+      if (error) reject(error);
+      else resolve();
+    };
     const timer = window.setTimeout(() => {
       socket.close();
-      reject(new Error("native /ui socket probe timed out"));
+      finish(new Error("native /ui socket probe timed out"));
     }, timeoutMs);
     socket.addEventListener(
       "open",
       () => {
-        window.clearTimeout(timer);
-        socket.close();
-        resolve();
+        opened = true;
+        // `/ui` permits one client. Wait for the probe connection's normal
+        // close handshake before mounting UiTransport, otherwise the real
+        // renderer can race the still-attached probe and be rejected as the
+        // second client (4409).
+        socket.close(1000, "native probe complete");
+      },
+      { once: true },
+    );
+    socket.addEventListener(
+      "close",
+      (event) => {
+        if (opened && event.code === 1000) finish();
+        else finish(new Error(`native /ui socket probe closed before completion (${event.code})`));
       },
       { once: true },
     );
     socket.addEventListener(
       "error",
       () => {
-        window.clearTimeout(timer);
-        reject(new Error("native /ui socket probe failed"));
+        finish(new Error("native /ui socket probe failed"));
       },
       { once: true },
     );
@@ -124,21 +148,31 @@ export function probeEmbedded(
 ): Promise<boolean> {
   return new Promise((resolve) => {
     let settled = false;
+    let timer: number | undefined;
     const finish = (ok: boolean): void => {
       if (settled) return;
       settled = true;
-      window.clearTimeout(timer);
+      if (timer !== undefined) window.clearTimeout(timer);
       window.removeEventListener("message", onMessage);
+      frame.removeEventListener("error", onError);
       resolve(ok);
     };
     const onMessage = (event: MessageEvent): void => {
       const data = event.data as { type?: unknown } | undefined;
       if (data && typeof data === "object" && data.type === LIVENESS_MARKER) finish(true);
     };
-    const timer = window.setTimeout(() => finish(false), timeoutMs);
-    window.addEventListener("message", onMessage);
-    frame.addEventListener("error", () => finish(false), { once: true });
-    frame.src = ideUrl;
+    const onError = (): void => finish(false);
+    try {
+      timer = window.setTimeout(() => finish(false), timeoutMs);
+      window.addEventListener("message", onMessage);
+      frame.addEventListener("error", onError, { once: true });
+      frame.src = ideUrl;
+    } catch {
+      // A hostile or incomplete host DOM can throw while listeners are being
+      // registered or while the iframe URL is assigned. A probe must always
+      // fail forward to the browser tier rather than reject and strand the UI.
+      finish(false);
+    }
   });
 }
 
@@ -148,13 +182,14 @@ export function probeEmbedded(
 export async function selectTier(
   session: SessionPayload,
   frame: HTMLIFrameElement,
+  options: TierProbeOptions = {},
 ): Promise<TierProbeResult> {
-  if (await probeNative(session)) {
+  if (await probeNative(session, options.nativeTimeoutMs ?? DEFAULT_NATIVE_TIMEOUT_MS)) {
     return { tier: "native", reason: "the /ui socket and assets bundle are both reachable" };
   }
   const ideUrl = session.ideUrl ?? session.openVscode?.browserUrl;
   if (ideUrl) {
-    if (await probeEmbedded(frame, ideUrl)) {
+    if (await probeEmbedded(frame, ideUrl, options.embeddedTimeoutMs ?? DEFAULT_EMBEDDED_TIMEOUT_MS)) {
       return { tier: "embedded", reason: "the embedded workbench frame confirmed it loaded" };
     }
     return {

@@ -40,7 +40,7 @@ async function startGateway() {
       runtime.close();
       await core.close();
       await gateway.close();
-      await rm(workspace, { recursive: true, force: true });
+      await rm(workspace, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
       delete process.env.MCP_VSCODE_DISABLE_PTY;
     },
     uiUrl(token?: string): string {
@@ -140,7 +140,9 @@ test("/ui RPC dispatch reuses the workspace sandbox and terminal lifecycle", asy
   assert.equal(unknown.error?.code, "METHOD_NOT_FOUND");
 
   const editorState = await rpc(socket, "editor.state", {});
-  assert.equal(editorState.error?.code, "VSCODE_BRIDGE_UNAVAILABLE");
+  // A native client asking the gateway for editor state must fail locally
+  // instead of routing back to itself and creating an RPC recursion loop.
+  assert.equal(editorState.error?.code, "NO_EDITOR_SURFACE");
 
   const created = await rpc(socket, "terminal.create", { columns: 80, rows: 24 });
   const terminalId = (created.result as { id: string }).id;

@@ -77,6 +77,11 @@ export function createEditor(
   });
 }
 
+// Re-exported so `src/app/editor.ts` (loaded in a different document/bundle)
+// can call `monaco.editor.createModel(...)` / reach `monaco.KeyMod` /
+// `monaco.KeyCode` without a second cross-origin dynamic import of its own.
+export { monaco };
+
 export function createTerminal(container: HTMLElement): { terminal: Terminal; fit: FitAddon } {
   const terminal = new Terminal({ convertEol: true });
   const fit = new FitAddon();

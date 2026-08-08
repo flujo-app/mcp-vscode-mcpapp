@@ -10,6 +10,13 @@ import type { Request, Response, NextFunction } from "express";
 import type { VscodeCore } from "../core/core.js";
 import type { OpenVscodeRuntime } from "../runtime/openvscode.js";
 import { createMcpServer, type McpServerContext } from "../mcp/server.js";
+import { createAssetsHandler, defaultAssetsRoot } from "./assets.js";
+import {
+  bufferAndInjectHtmlResponse,
+  isHtmlContentType,
+  isMaybeHtmlDocumentRequest,
+} from "./inject.js";
+import { UiSocketServer } from "./ui-socket.js";
 
 export interface GatewayOptions {
   core: VscodeCore;
@@ -20,17 +27,28 @@ export interface GatewayOptions {
   authToken?: string;
   tls?: { certPath: string; keyPath: string };
   appHtmlPath: string;
+  /** Internal-only: overrides the static asset root, for tests. Not a CLI flag. */
+  assetsRoot?: string;
 }
 
 export class Gateway {
   readonly #options: GatewayOptions;
   readonly #proxy = httpProxy.createProxyServer({ ws: true, xfwd: true, changeOrigin: false });
+  readonly #uiSocket: UiSocketServer;
   #server?: HttpServer;
   #origin = "";
 
   constructor(options: GatewayOptions) {
     this.#options = options;
-    this.#proxy.on("proxyRes", (proxyResponse) => {
+    this.#uiSocket = new UiSocketServer(options.core);
+    this.#proxy.on("proxyReq", (proxyRequest, request) => {
+      if (isMaybeHtmlDocumentRequest(request.method, request.headers.accept)) {
+        // Buffering the response for injection means we must never receive a
+        // compressed body, or we would have to gunzip/brotli-decode it first.
+        proxyRequest.setHeader("accept-encoding", "identity");
+      }
+    });
+    this.#proxy.on("proxyRes", (proxyResponse, request, response) => {
       delete proxyResponse.headers["x-frame-options"];
       proxyResponse.headers["referrer-policy"] = "no-referrer";
       // The IDE is embedded in a sandboxed (opaque-origin) MCP-app iframe, so the
@@ -47,6 +65,21 @@ export class Gateway {
           .filter((directive) => !directive.trim().toLowerCase().startsWith("frame-ancestors"))
           .join(";");
       }
+
+      if (!isMaybeHtmlDocumentRequest(request.method, request.headers.accept)) {
+        // `selfHandleResponse` was not requested for this proxy.web() call, so
+        // http-proxy's default header-write + pipe-through still applies.
+        return;
+      }
+      if (!isHtmlContentType(proxyResponse.headers)) {
+        // We asked for manual control (selfHandleResponse) in case this turned
+        // out to be the workbench document, but it wasn't one: replicate the
+        // default pass-through ourselves, unmodified.
+        response.writeHead(proxyResponse.statusCode ?? 200, proxyResponse.headers);
+        proxyResponse.pipe(response as unknown as NodeJS.WritableStream);
+        return;
+      }
+      bufferAndInjectHtmlResponse(proxyResponse, response as unknown as Response);
     });
     this.#proxy.on("error", (error, _request, response) => {
       if (response && "writeHead" in response && !response.headersSent) {
@@ -93,6 +126,13 @@ export class Gateway {
         next(error);
       }
     });
+
+    // Registered before the basePath/503 gate below: the static asset bundle
+    // must be reachable while OpenVSCode is still starting. Unauthenticated by
+    // design (public, non-secret static code fetched from a sandboxed document
+    // that cannot attach our token) — see the /ui socket for the authenticated
+    // surface.
+    app.use("/assets", createAssetsHandler({ root: this.#options.assetsRoot ?? defaultAssetsRoot }));
 
     app.all("/mcp", this.#bearerAuth.bind(this), async (request, response) => {
       const mcpServer = createMcpServer(this.#mcpContext());
@@ -145,7 +185,12 @@ export class Gateway {
         });
         return;
       }
-      this.#proxy.web(request, response, { target });
+      this.#proxy.web(request, response, {
+        target,
+        ...(isMaybeHtmlDocumentRequest(request.method, request.headers.accept)
+          ? { selfHandleResponse: true }
+          : {}),
+      });
     });
 
     const nodeServer = this.#options.tls
@@ -162,6 +207,10 @@ export class Gateway {
       const pathname = new URL(request.url ?? "/", "http://localhost").pathname;
       if (pathname === "/bridge") {
         this.#options.core.bridge.handleUpgrade(request, socket, head);
+        return;
+      }
+      if (pathname === "/ui") {
+        this.#uiSocket.handleUpgrade(request, socket, head);
         return;
       }
       if (pathname.startsWith(this.#options.runtime.basePath)) {
@@ -190,6 +239,7 @@ export class Gateway {
 
   async close(): Promise<void> {
     this.#proxy.close();
+    this.#uiSocket.close();
     if (!this.#server) return;
     await new Promise<void>((resolve, reject) => {
       this.#server?.close((error) => (error ? reject(error) : resolve()));
@@ -213,6 +263,8 @@ export class Gateway {
       openVscode: this.#options.runtime.status(),
       ideUrl: this.#options.runtime.status().browserUrl,
       gatewayOrigin: this.#origin,
+      uiToken: this.#options.core.bridgeToken,
+      assetsUrl: `${this.#origin}/assets`,
     };
   }
 

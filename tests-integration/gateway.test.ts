@@ -54,9 +54,25 @@ test("HTTP gateway serves MCP, proxies the workbench, and authenticates the brid
   const appResponse = await fetch(`${started.origin}/app?token=integration-token`);
   assert.equal(appResponse.status, 200);
   assert.match(await appResponse.text(), /__MCP_VSCODE_DEBUG__/);
-  const ideResponse = await fetch(`${started.origin}${runtime.basePath}/`);
+  const ideResponse = await fetch(`${started.origin}${runtime.basePath}/`, {
+    headers: { accept: "text/html" },
+  });
   assert.equal(ideResponse.status, 200);
-  assert.match(await ideResponse.text(), /Mock OpenVSCode/);
+  const ideBody = await ideResponse.text();
+  assert.match(ideBody, /Mock OpenVSCode/);
+  // Task 4: the proxied HTML document carries the liveness-handshake script,
+  // and content-length is recomputed to match the (larger) injected body.
+  assert.match(ideBody, /mcp-vscode:workbench-alive/);
+  assert.equal(ideResponse.headers.get("content-length"), String(Buffer.byteLength(ideBody, "utf8")));
+  assert.equal(ideResponse.headers.get("transfer-encoding"), null);
+  // x-frame-options / frame-ancestors stripping still applies after buffering.
+  assert.equal(ideResponse.headers.get("x-frame-options"), null);
+
+  const ideResponseNoAccept = await fetch(`${started.origin}${runtime.basePath}/plain`, {
+    headers: { accept: "application/octet-stream" },
+  });
+  assert.equal(ideResponseNoAccept.status, 200);
+  assert.doesNotMatch(await ideResponseNoAccept.text(), /mcp-vscode:workbench-alive/);
 
   const client = new Client({ name: "gateway-test", version: "1.0.0" }, { capabilities: {} });
   const transport = new StreamableHTTPClientTransport(new URL(`${started.origin}/mcp`), {

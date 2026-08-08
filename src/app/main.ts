@@ -10,6 +10,8 @@ interface SessionPayload {
   workspaceRoot?: string;
   ideUrl?: string;
   gatewayOrigin?: string;
+  uiToken?: string;
+  assetsUrl?: string;
   bridge?: { connected?: boolean };
   openVscode?: {
     state?: string;

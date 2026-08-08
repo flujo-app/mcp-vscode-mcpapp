@@ -14,5 +14,5 @@
     "noEmit": true
   },
   "include": ["src/**/*.ts", "tests/**/*.ts", "tests-integration/**/*.ts"],
-  "exclude": ["src/bridge-extension/**", "src/app/**", "dist", "node_modules"]
+  "exclude": ["src/bridge-extension/**", "src/app/**", "src/ui/**", "dist", "node_modules"]
 }

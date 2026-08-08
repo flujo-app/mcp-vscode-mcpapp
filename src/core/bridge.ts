@@ -4,7 +4,7 @@ import { WebSocketServer, WebSocket } from "ws";
 import { CoreEvents } from "./events.js";
 import { McpVscodeError, serializeError } from "./errors.js";
 
-interface BridgeMessage {
+export interface BridgeMessage {
   type: string;
   id?: string;
   method?: string;
@@ -145,7 +145,7 @@ export class VscodeBridge {
   }
 }
 
-function safeTokenEqual(value: string | undefined, expected: string): boolean {
+export function safeTokenEqual(value: string | undefined, expected: string): boolean {
   if (!value) return false;
   const left = Buffer.from(value);
   const right = Buffer.from(expected);

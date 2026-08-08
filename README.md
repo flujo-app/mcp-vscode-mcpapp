@@ -30,6 +30,23 @@ flowchart LR
 
 The OpenVSCode process binds only to loopback. A gateway exposes it under a random, high-entropy path, avoiding third-party-cookie authentication inside the MCP sandbox. Remote MCP deployments must use TLS and bearer authentication.
 
+## Gateway HTTP surface
+
+The same HTTP(S) server used for `/mcp` also exposes:
+
+| Route | Auth | Purpose |
+| --- | --- | --- |
+| `GET /healthz` | none | Liveness probe. |
+| `GET /session.json` | `?token=` (if `--auth-token` set) | JSON session payload (workspace, OpenVSCode, bridge, `uiToken`, `assetsUrl`). |
+| `GET /app` | `?token=` (if `--auth-token` set) | The MCP App HTML shell. |
+| `ALL /mcp` | `Authorization: Bearer` (if `--auth-token` set) | Streamable HTTP MCP transport. |
+| `GET /assets/*` | none (public, read-only, static bundle) | Monaco/xterm/UI bundle for a future native renderer. Reachable even before OpenVSCode finishes starting. |
+| `GET /ide/<random>/...` | none beyond the unguessable path | Proxied OpenVSCode workbench. |
+| `WS /bridge` | first-message `{ type: "hello", token }` | The VS Code bridge extension's JSON-RPC channel. |
+| `WS /ui` | `?token=` query parameter | Direct JSON-RPC channel (same framing as `/bridge`) for workspace/terminal/editor operations, bypassing the VS Code extension. Loopback-only, single client, reuses the same `bridgeToken` — see [SECURITY.md](SECURITY.md). |
+
+`uiToken` in the session payload is currently identical to the bridge token (one shared secret, zero new configuration, per the design in issue #6). `assetsUrl` is `${gatewayOrigin}/assets`.
+
 ## Capabilities
 
 - Self-hosted Code OSS workbench rendered inside the MCP App sandbox.

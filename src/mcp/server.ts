@@ -13,6 +13,19 @@ import type { VscodeCore } from "../core/core.js";
 import { McpVscodeError, serializeError } from "../core/errors.js";
 import { runProcess } from "../core/process.js";
 import type { OpenVscodeRuntime } from "../runtime/openvscode.js";
+import {
+  terminalCreateShape,
+  terminalKillShape,
+  terminalReadShape,
+  terminalResizeShape,
+  terminalWriteShape,
+  workspaceDeleteShape,
+  workspaceListShape,
+  workspaceMoveShape,
+  workspaceReadShape,
+  workspaceSearchShape,
+  workspaceWriteShape,
+} from "./schemas.js";
 
 const RESOURCE_URI = "ui://mcp-vscode/workbench.html";
 
@@ -101,11 +114,7 @@ export function createMcpServer(context: McpServerContext): McpServer {
   registerTool(server, "fs_list", {
     title: "List files",
     description: "List files and directories inside the configured workspace.",
-    inputSchema: {
-      path: z.string().default("."),
-      recursive: z.boolean().default(false),
-      maxEntries: z.number().int().min(1).max(20_000).default(2_000),
-    },
+    inputSchema: workspaceListShape,
     annotations: readOnly,
     handler: async ({ path: userPath, recursive, maxEntries }) => ({
       entries: await core.workspace.list(userPath, recursive, maxEntries),
@@ -115,10 +124,7 @@ export function createMcpServer(context: McpServerContext): McpServer {
   registerTool(server, "fs_read", {
     title: "Read file",
     description: "Read a UTF-8 or base64 file with a version hash for conflict-safe writes.",
-    inputSchema: {
-      path: z.string().min(1),
-      encoding: z.enum(["utf8", "base64"]).default("utf8"),
-    },
+    inputSchema: workspaceReadShape,
     annotations: readOnly,
     handler: async ({ path: userPath, encoding }) => await core.workspace.read(userPath, encoding),
   });
@@ -126,13 +132,7 @@ export function createMcpServer(context: McpServerContext): McpServer {
   registerTool(server, "fs_write", {
     title: "Write file",
     description: "Create or replace a workspace file. Use expectedVersion to prevent lost updates.",
-    inputSchema: {
-      path: z.string().min(1),
-      content: z.string(),
-      encoding: z.enum(["utf8", "base64"]).default("utf8"),
-      expectedVersion: z.string().optional(),
-      createParents: z.boolean().default(true),
-    },
+    inputSchema: workspaceWriteShape,
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
     handler: async (args) => {
       if (args.expectedVersion) {
@@ -155,10 +155,7 @@ export function createMcpServer(context: McpServerContext): McpServer {
   registerTool(server, "fs_delete", {
     title: "Delete file",
     description: "Delete a workspace file or, with recursive=true, a directory. The workspace root is protected.",
-    inputSchema: {
-      path: z.string().min(1),
-      recursive: z.boolean().default(false),
-    },
+    inputSchema: workspaceDeleteShape,
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
     handler: async ({ path: userPath, recursive }) => await core.workspace.delete(userPath, recursive),
   });
@@ -166,7 +163,7 @@ export function createMcpServer(context: McpServerContext): McpServer {
   registerTool(server, "fs_move", {
     title: "Move file",
     description: "Move or rename a file or directory inside the workspace.",
-    inputSchema: { from: z.string().min(1), to: z.string().min(1) },
+    inputSchema: workspaceMoveShape,
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
     handler: async ({ from, to }) => await core.workspace.move(from, to),
   });
@@ -174,13 +171,7 @@ export function createMcpServer(context: McpServerContext): McpServer {
   registerTool(server, "fs_search", {
     title: "Search workspace",
     description: "Search text files recursively inside the workspace.",
-    inputSchema: {
-      query: z.string().min(1),
-      path: z.string().default("."),
-      regex: z.boolean().default(false),
-      caseSensitive: z.boolean().default(false),
-      maxResults: z.number().int().min(1).max(2_000).default(200),
-    },
+    inputSchema: workspaceSearchShape,
     annotations: readOnly,
     handler: async (args) => ({ matches: await core.workspace.search(args) }),
   });
@@ -293,15 +284,7 @@ export function createMcpServer(context: McpServerContext): McpServer {
   registerTool(server, "terminal_create", {
     title: "Create terminal",
     description: "Create a terminal session shared by MCP tools and the embedded VS Code UI.",
-    inputSchema: {
-      cwd: z.string().default("."),
-      shell: z.string().optional(),
-      args: z.array(z.string()).optional(),
-      name: z.string().optional(),
-      columns: z.number().int().min(10).max(500).default(120),
-      rows: z.number().int().min(2).max(200).default(30),
-      env: z.record(z.string(), z.string()).optional(),
-    },
+    inputSchema: terminalCreateShape,
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     handler: async ({ cwd, ...args }) => {
       const absoluteCwd = await core.workspace.resolve(cwd);
@@ -320,10 +303,7 @@ export function createMcpServer(context: McpServerContext): McpServer {
   registerTool(server, "terminal_read", {
     title: "Read terminal",
     description: "Read recent buffered output from a terminal session.",
-    inputSchema: {
-      id: z.string().uuid(),
-      tailCharacters: z.number().int().min(1).max(2_000_000).default(20_000),
-    },
+    inputSchema: terminalReadShape,
     annotations: readOnly,
     handler: async ({ id, tailCharacters }) => core.terminals.read(id, tailCharacters),
   });
@@ -331,7 +311,7 @@ export function createMcpServer(context: McpServerContext): McpServer {
   registerTool(server, "terminal_write", {
     title: "Write terminal input",
     description: "Write raw input to a shared terminal session.",
-    inputSchema: { id: z.string().uuid(), data: z.string() },
+    inputSchema: terminalWriteShape,
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
     handler: async ({ id, data }) => core.terminals.write(id, data),
   });
@@ -339,11 +319,7 @@ export function createMcpServer(context: McpServerContext): McpServer {
   registerTool(server, "terminal_resize", {
     title: "Resize terminal",
     description: "Resize a shared terminal PTY.",
-    inputSchema: {
-      id: z.string().uuid(),
-      columns: z.number().int().min(10).max(500),
-      rows: z.number().int().min(2).max(200),
-    },
+    inputSchema: terminalResizeShape,
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     handler: async ({ id, columns, rows }) => core.terminals.resize(id, columns, rows),
   });
@@ -351,7 +327,7 @@ export function createMcpServer(context: McpServerContext): McpServer {
   registerTool(server, "terminal_kill", {
     title: "Kill terminal",
     description: "Terminate a shared terminal process.",
-    inputSchema: { id: z.string().uuid() },
+    inputSchema: terminalKillShape,
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
     handler: async ({ id }) => core.terminals.kill(id),
   });
@@ -469,6 +445,8 @@ function sessionPayload(context: McpServerContext): Record<string, unknown> {
     openVscode: context.runtime.status(),
     ideUrl: context.runtime.status().browserUrl,
     gatewayOrigin: context.gatewayOrigin,
+    uiToken: context.core.bridgeToken,
+    assetsUrl: `${context.gatewayOrigin}/assets`,
   };
 }
 

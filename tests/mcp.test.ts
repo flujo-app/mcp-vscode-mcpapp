@@ -74,4 +74,59 @@ test("MCP server exposes the app resource and complete baseline tool surface", a
   const app = await client.readResource({ uri: "ui://mcp-vscode/workbench.html" });
   assert.equal(app.contents[0]?.mimeType, "text/html;profile=mcp-app");
   assert.match("text" in app.contents[0]! ? app.contents[0].text : "", /MCP_VSCODE_APP/);
+
+  const status = await client.callTool({ name: "workspace_status", arguments: {} });
+  const payload = status.structuredContent as { uiToken?: string; assetsUrl?: string };
+  assert.equal(payload.uiToken, core.bridgeToken);
+  assert.equal(payload.assetsUrl, "https://editor.example.test/assets");
+});
+
+test("registerAppResource CSP metadata still lists the gateway origin after the /assets and /ui additions", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "mcp-vscode-mcp-csp-"));
+  const core = new VscodeCore(root);
+  await core.initialize();
+  t.after(async () => {
+    await core.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  const runtime = {
+    status: () => ({ state: "ready", browserUrl: "https://editor.example.test/ide/", logs: [] }),
+  } as unknown as OpenVscodeRuntime;
+  const server = createMcpServer({
+    core,
+    runtime,
+    gatewayOrigin: "https://editor.example.test",
+    appHtmlPath: path.resolve("src/app/index.html"),
+  });
+  const client = new Client(
+    { name: "mcp-vscode-tests", version: "1.0.0" },
+    {
+      capabilities: {
+        extensions: { "io.modelcontextprotocol/ui": { mimeTypes: ["text/html;profile=mcp-app"] } },
+      } as never,
+    },
+  );
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await server.connect(serverTransport);
+  await client.connect(clientTransport);
+  t.after(async () => {
+    await client.close();
+    await server.close();
+  });
+
+  const app = await client.readResource({ uri: "ui://mcp-vscode/workbench.html" });
+  interface CspMeta {
+    frameDomains?: string[];
+    connectDomains?: string[];
+    resourceDomains?: string[];
+    baseUriDomains?: string[];
+  }
+  const meta = (app.contents[0]?._meta as { ui?: { csp?: CspMeta } } | undefined)?.ui?.csp;
+  assert.ok(meta, "expected _meta.ui.csp on the resource contents");
+  assert.ok(meta!.connectDomains?.includes("https://editor.example.test"));
+  assert.ok(meta!.connectDomains?.includes("wss://editor.example.test"));
+  assert.ok(meta!.resourceDomains?.includes("https://editor.example.test"));
+  assert.ok(meta!.baseUriDomains?.includes("https://editor.example.test"));
+  // /assets and /ui are same-origin with the resource's own domain metadata,
+  // so no additional CSP entries are required for them.
 });

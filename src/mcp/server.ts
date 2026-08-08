@@ -40,6 +40,21 @@ export function createMcpServer(context: McpServerContext): McpServer {
   const { core, runtime } = context;
   const server = new McpServer({ name: "mcp-vscode", version: "0.1.0" });
 
+  /**
+   * Routes an editor/diagnostics RPC to whichever surface is live (VS Code
+   * bridge -> native /ui renderer -> `NO_EDITOR_SURFACE`), and stamps the
+   * additive `surface` field onto the result so callers can tell fidelity
+   * apart (Phase 3 plan, issue #8, §2.4 / O1).
+   */
+  const callEditor = async (method: string, params?: unknown, timeoutMs?: number): Promise<Record<string, unknown>> => {
+    const surface = core.editorSurface.resolve();
+    const result = await surface.call<unknown>(method, params, timeoutMs);
+    const base = result && typeof result === "object" && !Array.isArray(result)
+      ? (result as Record<string, unknown>)
+      : { value: result };
+    return { ...base, surface: surface.kind };
+  };
+
   registerAppTool(
     server,
     "vscode_open",
@@ -187,7 +202,7 @@ export function createMcpServer(context: McpServerContext): McpServer {
       preserveFocus: z.boolean().default(false),
     },
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
-    handler: async (args) => await core.bridge.call("editor.open", args),
+    handler: async (args) => await callEditor("editor.open", args),
   });
 
   registerTool(server, "editor_state", {
@@ -195,7 +210,7 @@ export function createMcpServer(context: McpServerContext): McpServer {
     description: "Return visible editors, active document, selections, dirty buffers, and workspace folders.",
     inputSchema: {},
     annotations: readOnly,
-    handler: async () => await core.bridge.call("editor.state"),
+    handler: async () => await callEditor("editor.state"),
   });
 
   registerTool(server, "editor_set_selection", {
@@ -209,7 +224,7 @@ export function createMcpServer(context: McpServerContext): McpServer {
       endColumn: z.number().int().min(1),
     },
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
-    handler: async (args) => await core.bridge.call("editor.setSelection", args),
+    handler: async (args) => await callEditor("editor.setSelection", args),
   });
 
   registerTool(server, "editor_apply_edits", {
@@ -227,7 +242,7 @@ export function createMcpServer(context: McpServerContext): McpServer {
       save: z.boolean().default(true),
     },
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
-    handler: async (args) => await core.bridge.call("editor.applyEdits", args),
+    handler: async (args) => await callEditor("editor.applyEdits", args),
   });
 
   registerTool(server, "diagnostics_get", {
@@ -235,7 +250,7 @@ export function createMcpServer(context: McpServerContext): McpServer {
     description: "Return VS Code diagnostics for a file or the entire workspace.",
     inputSchema: { path: z.string().optional() },
     annotations: readOnly,
-    handler: async (args) => await core.bridge.call("diagnostics.get", args),
+    handler: async (args) => await callEditor("diagnostics.get", args),
   });
 
   registerTool(server, "vscode_list_commands", {

@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
 import { WebSocketServer, WebSocket } from "ws";
@@ -5,6 +6,7 @@ import type { BridgeMessage } from "../core/bridge.js";
 import { safeTokenEqual } from "../core/bridge.js";
 import type { VscodeCore } from "../core/core.js";
 import type { CoreEvent } from "../core/events.js";
+import type { EditorSurface } from "../core/editor-surface.js";
 import { McpVscodeError, serializeError } from "../core/errors.js";
 import {
   terminalAttachSchema,
@@ -25,6 +27,13 @@ const MAX_MISSED_PONGS = 2;
 // Frames are dropped (not queued) once this much data is already buffered on
 // the socket, so a slow/stalled client cannot grow our memory unboundedly.
 const BACKPRESSURE_CEILING_BYTES = 8 * 1024 * 1024;
+const DEFAULT_UI_RPC_TIMEOUT_MS = 10_000;
+
+interface PendingUiRpc {
+  resolve(value: unknown): void;
+  reject(error: Error): void;
+  timer: NodeJS.Timeout;
+}
 
 /**
  * `/ui` WebSocket endpoint: same JSON-RPC framing as `VscodeBridge`
@@ -36,6 +45,7 @@ const BACKPRESSURE_CEILING_BYTES = 8 * 1024 * 1024;
 export class UiSocketServer {
   readonly #server = new WebSocketServer({ noServer: true });
   readonly #core: VscodeCore;
+  readonly #pending = new Map<string, PendingUiRpc>();
   #socket?: WebSocket;
   #unsubscribe?: () => void;
   #heartbeat?: NodeJS.Timeout;
@@ -64,6 +74,37 @@ export class UiSocketServer {
 
     this.#server.handleUpgrade(request, socket, head, (webSocket) => {
       this.#server.emit("connection", webSocket, request);
+    });
+  }
+
+  /** Whether a native `/ui` renderer is currently connected. */
+  status(): { attached: boolean } {
+    return { attached: this.#socket?.readyState === WebSocket.OPEN };
+  }
+
+  /**
+   * Server-initiated RPC to the attached `/ui` client, mirroring
+   * `VscodeBridge.call()`. Rejects fast with `NO_EDITOR_SURFACE` when no
+   * client is attached, with `UI_RPC_TIMEOUT` if it does not answer in time,
+   * and with `UI_RPC_ERROR` if it answers with an error.
+   */
+  async call<T = unknown>(method: string, params?: unknown, timeoutMs = DEFAULT_UI_RPC_TIMEOUT_MS): Promise<T> {
+    const socket = this.#socket;
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      throw new McpVscodeError("No native /ui client is attached", "NO_EDITOR_SURFACE");
+    }
+    const id = randomUUID();
+    return await new Promise<T>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.#pending.delete(id);
+        reject(new McpVscodeError(`/ui RPC timed out: ${method}`, "UI_RPC_TIMEOUT"));
+      }, timeoutMs);
+      this.#pending.set(id, {
+        resolve: (value) => resolve(value as T),
+        reject,
+        timer,
+      });
+      this.#send(socket, { type: "rpc", id, method, params });
     });
   }
 
@@ -119,6 +160,15 @@ export class UiSocketServer {
     this.#unsubscribe = undefined;
     this.#attachedTerminals.clear();
     this.#socket = undefined;
+    this.#rejectAllPending();
+  }
+
+  #rejectAllPending(): void {
+    for (const pending of this.#pending.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(new McpVscodeError("The native /ui client disconnected", "NO_EDITOR_SURFACE"));
+    }
+    this.#pending.clear();
   }
 
   #onCoreEvent(socket: WebSocket, event: CoreEvent): void {
@@ -138,11 +188,28 @@ export class UiSocketServer {
       socket.close(4400, "Invalid JSON");
       return;
     }
+    // Reply to a server-initiated call() (new, additive discriminator; does
+    // not collide with the legacy client->server `type: "rpc"` request shape).
+    if (message.type === "rpc-result" && typeof message.id === "string") {
+      this.#resolvePending(message);
+      return;
+    }
     if (message.type !== "rpc" || typeof message.id !== "string" || typeof message.method !== "string") {
       socket.close(4400, "Invalid message");
       return;
     }
     void this.#dispatch(socket, message.id, message.method, message.params);
+  }
+
+  #resolvePending(message: BridgeMessage): void {
+    const id = message.id;
+    if (!id) return;
+    const pending = this.#pending.get(id);
+    if (!pending) return;
+    this.#pending.delete(id);
+    clearTimeout(pending.timer);
+    if (message.error) pending.reject(new McpVscodeError("/ui RPC failed", "UI_RPC_ERROR", message.error));
+    else pending.resolve(message.result);
   }
 
   async #dispatch(socket: WebSocket, id: string, method: string, params: unknown): Promise<void> {
@@ -204,6 +271,16 @@ export class UiSocketServer {
         return core.terminals.read(args.id);
       }
       case "editor.state": {
+        // This handler is reached only when the native /ui client itself asks
+        // for editor state (e.g. to render VS Code overlay info); it must not
+        // call back into the editor-surface router, or a native client would
+        // ask the gateway, which would ask the native client again.
+        if (!core.bridge.status().connected) {
+          throw new McpVscodeError(
+            "No VS Code bridge is connected; the native renderer owns editor state.",
+            "NO_EDITOR_SURFACE",
+          );
+        }
         return await core.bridge.call("editor.state");
       }
       default:
@@ -221,6 +298,29 @@ export class UiSocketServer {
       return;
     }
     socket.send(JSON.stringify(message));
+  }
+}
+
+/**
+ * `EditorSurface` adapter over the native `/ui` renderer, registered once by
+ * the gateway on `core.editorSurface`. `available()` reads live socket
+ * status; no register/unregister lifecycle is needed since there is at most
+ * one `/ui` client.
+ */
+export class UiEditorSurface implements EditorSurface {
+  readonly kind = "native" as const;
+  readonly #ui: UiSocketServer;
+
+  constructor(ui: UiSocketServer) {
+    this.#ui = ui;
+  }
+
+  available(): boolean {
+    return this.#ui.status().attached;
+  }
+
+  call<T = unknown>(method: string, params?: unknown, timeoutMs?: number): Promise<T> {
+    return this.#ui.call<T>(method, params, timeoutMs);
   }
 }
 

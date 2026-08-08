@@ -16,7 +16,7 @@ import {
   isHtmlContentType,
   isMaybeHtmlDocumentRequest,
 } from "./inject.js";
-import { UiSocketServer } from "./ui-socket.js";
+import { UiEditorSurface, UiSocketServer } from "./ui-socket.js";
 
 export interface GatewayOptions {
   core: VscodeCore;
@@ -41,6 +41,7 @@ export class Gateway {
   constructor(options: GatewayOptions) {
     this.#options = options;
     this.#uiSocket = new UiSocketServer(options.core);
+    options.core.editorSurface.registerNative(new UiEditorSurface(this.#uiSocket));
     this.#proxy.on("proxyReq", (proxyRequest, request) => {
       if (isMaybeHtmlDocumentRequest(request.method, request.headers.accept)) {
         // Buffering the response for injection means we must never receive a

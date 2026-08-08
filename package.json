@@ -1,7 +1,6 @@
 {
   "name": "@mario.andreschak/mcp-vscode",
-  "version": "0.2.1-beta.1",
-  "mcpVscodeRuntimeVersion": "0.2.0",
+  "version": "0.2.1",
   "mcpName": "io.github.mario-andreschak/mcp-vscode",
   "description": "A self-hosted VS Code workbench embedded as an interactive MCP App.",
   "type": "module",

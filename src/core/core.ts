@@ -1,7 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { CoreEvents } from "./events.js";
 import { VscodeBridge } from "./bridge.js";
-import { EditorSurfaceRouter } from "./editor-surface.js";
 import { TerminalManager } from "./terminal.js";
 import { Workspace } from "./workspace.js";
 
@@ -11,7 +10,6 @@ export class VscodeCore {
   readonly terminals = new TerminalManager(this.events);
   readonly bridgeToken = randomBytes(32).toString("base64url");
   readonly bridge = new VscodeBridge(this.bridgeToken, this.events);
-  readonly editorSurface = new EditorSurfaceRouter(this.bridge);
 
   constructor(workspaceRoot: string) {
     this.workspace = new Workspace(workspaceRoot, this.events);
@@ -79,7 +77,6 @@ export class VscodeCore {
       bridge: this.bridge.status(),
       terminals: this.terminals.list(),
       overlays: this.workspace.overlays(),
-      editorSurface: this.editorSurface.status(),
     };
   }
 }

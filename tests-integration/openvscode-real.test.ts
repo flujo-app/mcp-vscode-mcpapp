@@ -9,8 +9,8 @@ import { OpenVscodeRuntime } from "../src/runtime/openvscode.js";
 
 const runtimeRoot = process.env.MCP_VSCODE_REAL_RUNTIME_ROOT;
 
-test("native OpenVSCode serves the workbench with the MCP bridge installed", {
-  skip: runtimeRoot ? false : "Set MCP_VSCODE_REAL_RUNTIME_ROOT to run the native runtime test",
+test("real OpenVSCode serves the workbench with the MCP bridge installed", {
+  skip: runtimeRoot ? false : "Set MCP_VSCODE_REAL_RUNTIME_ROOT to run the real runtime test",
   timeout: 60_000,
 }, async (t) => {
   assert.ok(runtimeRoot);
@@ -53,7 +53,7 @@ test("native OpenVSCode serves the workbench with the MCP bridge installed", {
 
   const extensions = await readdir(path.join(stateRoot, "extensions"), { withFileTypes: true });
   const bridgeDirectory = extensions.find((entry) => entry.isDirectory() && entry.name.startsWith("flujo.mcp-vscode-"));
-  assert.ok(bridgeDirectory, "The MCP bridge extension was not installed into the native runtime");
+  assert.ok(bridgeDirectory, "The MCP bridge extension was not installed into the real runtime");
   const bridgeManifest = JSON.parse(await readFile(
     path.join(stateRoot, "extensions", bridgeDirectory.name, "package.json"),
     "utf8",

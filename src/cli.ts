@@ -4,8 +4,14 @@ import process from "node:process";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { VscodeCore } from "./core/core.js";
 import { Gateway } from "./http/gateway.js";
-import { createMcpServer, defaultAppHtmlPath } from "./mcp/server.js";
+import { runtimeBrokerRegistrationFromEnv } from "./http/runtime-registration.js";
+import {
+  createMcpServer,
+  defaultAppHtmlPath,
+  MCP_VSCODE_APP_RESOURCE_URI,
+} from "./mcp/server.js";
 import { OpenVscodeRuntime } from "./runtime/openvscode.js";
+import { parseBooleanEnv, parseRenderMode } from "./runtime/render-mode.js";
 
 const parsed = parseArgs({
   allowPositionals: false,
@@ -41,7 +47,11 @@ if (parsed.values.help) {
     `  --auth-token <token>    Bearer token required by the /mcp endpoint\n` +
     `  --cert/--key <path>     PEM TLS certificate and private key\n` +
     `  --openvscode-root <dir> Override the bundled OpenVSCode runtime location\n` +
-    `  --ide-url <url>         Development-only external IDE target\n`);
+    `  --ide-url <url>         Development-only external IDE target\n\n` +
+    `Experimental environment options:\n` +
+    `  MCP_VSCODE_RENDER_MODE=stream       Pixel-stream the genuine workbench\n` +
+    `  MCP_VSCODE_STREAM_BROWSER=<path>    Override Edge/Chrome/Chromium discovery\n` +
+    `  MCP_VSCODE_STREAM_NO_SANDBOX=1      Disable Chromium sandbox (unsafe)\n`);
   process.exit(0);
 }
 
@@ -56,6 +66,12 @@ async function main(): Promise<void> {
   const configuredWorkspace = values.workspace ?? process.env.MCP_VSCODE_WORKSPACE;
   const workspaceRoot = path.resolve(configuredWorkspace ?? process.cwd());
   const host = values.host ?? "127.0.0.1";
+  const renderMode = parseRenderMode(process.env.MCP_VSCODE_RENDER_MODE);
+  const runtimeBroker = runtimeBrokerRegistrationFromEnv();
+  const streamNoSandbox = parseBooleanEnv(
+    "MCP_VSCODE_STREAM_NO_SANDBOX",
+    process.env.MCP_VSCODE_STREAM_NO_SANDBOX,
+  );
   const port = Number.parseInt(values.port ?? "0", 10);
   if (!Number.isInteger(port) || port < 0 || port > 65_535) throw new Error(`Invalid port: ${values.port}`);
   if (values.https && (!values.cert || !values.key)) {
@@ -92,6 +108,21 @@ async function main(): Promise<void> {
     appHtmlPath: defaultAppHtmlPath(),
     ...(values["public-url"] ? { publicUrl: values["public-url"] } : {}),
     ...(values["auth-token"] ? { authToken: values["auth-token"] } : {}),
+    stream: {
+      enabled: renderMode === "stream",
+      ...(process.env.MCP_VSCODE_STREAM_BROWSER
+        ? { browserExecutable: process.env.MCP_VSCODE_STREAM_BROWSER }
+        : {}),
+      noSandbox: streamNoSandbox,
+    },
+    ...(runtimeBroker
+      ? {
+          runtimeBroker: {
+            registration: runtimeBroker,
+            resourceUri: MCP_VSCODE_APP_RESOURCE_URI,
+          },
+        }
+      : {}),
     ...(values.https && values.cert && values.key
       ? { tls: { certPath: path.resolve(values.cert), keyPath: path.resolve(values.key) } }
       : {}),
@@ -99,10 +130,19 @@ async function main(): Promise<void> {
   const address = await gateway.start();
   const bridgeUrl = gateway.localBridgeUrl;
   const runtimeStatus = await runtime.start({ gatewayOrigin: address.origin, bridgeUrl });
-  process.stderr.write(`[mcp-vscode] UI gateway: ${address.origin}/app\n`);
-  process.stderr.write(`[mcp-vscode] MCP endpoint: ${address.origin}/mcp\n`);
-  if (runtimeStatus.browserUrl) process.stderr.write(`[mcp-vscode] OpenVSCode: ${runtimeStatus.browserUrl}\n`);
+  if (runtimeBroker) {
+    process.stderr.write(`[mcp-vscode] FLUJO App runtime origin: ${address.origin}\n`);
+  } else {
+    process.stderr.write(`[mcp-vscode] UI gateway: ${address.origin}/app\n`);
+    process.stderr.write(`[mcp-vscode] MCP endpoint: ${address.origin}/mcp\n`);
+  }
+  if (runtimeStatus.browserUrl) {
+    process.stderr.write(`[mcp-vscode] OpenVSCode: ${redactWorkbenchCapability(runtimeStatus.browserUrl)}\n`);
+  }
   else process.stderr.write(`[mcp-vscode] OpenVSCode unavailable: ${runtimeStatus.error ?? "unknown error"}\n`);
+  if (renderMode === "stream") {
+    process.stderr.write("[mcp-vscode] Experimental genuine-workbench pixel streaming enabled\n");
+  }
 
   let stdioServer: ReturnType<typeof createMcpServer> | undefined;
   if (values.stdio) {
@@ -111,10 +151,10 @@ async function main(): Promise<void> {
   }
 
   const shutdown = async () => {
-    runtime.close();
     await stdioServer?.close();
-    await core.close();
     await gateway.close();
+    runtime.close();
+    await core.close();
   };
   process.once("SIGINT", () => void shutdown().finally(() => process.exit(0)));
   process.once("SIGTERM", () => void shutdown().finally(() => process.exit(0)));
@@ -122,4 +162,12 @@ async function main(): Promise<void> {
 
 function isLoopback(host: string): boolean {
   return host === "127.0.0.1" || host === "localhost" || host === "::1";
+}
+
+function redactWorkbenchCapability(value: string): string {
+  try {
+    return `${new URL(value).origin}/ide/<app-only>/`;
+  } catch {
+    return "ready (App-only URL)";
+  }
 }

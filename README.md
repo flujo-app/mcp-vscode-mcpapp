@@ -1,94 +1,213 @@
-mcp-vscode-mcpapp in [FLUJO](https://flujo.com.co/)
-<img width="1096" height="597" alt="image" src="https://github.com/user-attachments/assets/f6860467-9957-4fd4-975c-96484c0f6ea8" />
-
-mcp-vscode-mcpapp in Goose
-<img width="1816" height="1080" alt="image" src="https://github.com/user-attachments/assets/07cba92c-48d0-47cc-b1bc-978410156e30" />
-
-
 # MCP VS Code
 
-MCP VS Code embeds a self-hosted Code OSS/OpenVSCode workbench inside an MCP App. The model and the human operate the same workspace, open editors, diagnostics, commands, and terminal sessions in real time.
+MCP VS Code runs a self-hosted Code OSS/OpenVSCode workbench beside an MCP server so the human and the model operate the same workspace, open editors, diagnostics, commands, extensions, and terminal sessions.
 
-This is not remote control of a separately installed VS Code. The standalone distribution contains the editor server, Node.js runtime, MCP server, bridge extension, and web UI. Microsoft-hosted `vscode.dev` is not used because it disallows framing.
+> **No-facsimile guarantee:** every editor UI shown by this project is the genuine OpenVSCode workbench. The MCP App never replaces it with a hand-built editor or terminal while continuing to call the result VS Code. If the real workbench cannot be displayed, the App says so and offers the same workbench in a browser when a reachable URL exists.
 
-> **Project status:** functional v0.2 implementation. Prerequisite-free releases target Windows x64, Linux x64, and Linux ARM64. Linux packages use verified upstream OpenVSCode archives; the Windows package is built in Windows CI from the pinned OpenVSCode source commit and exercised against the real workbench and bridge.
+This is not remote control of a separately installed desktop VS Code. Supported distributions carry their own OpenVSCode runtime and bridge extension. Microsoft-hosted `vscode.dev` is not used because it disallows framing.
 
-## How it works
+> **Project status:** functional v0.2 implementation. Default releases target Windows x64, Linux x64, and Linux ARM64. macOS is not supported because upstream publishes no OpenVSCode Server runtime for Darwin.
+
+## The caveman picture
+
+There are four pieces:
+
+1. The **MCP host**—for example FLUJO or Claude Desktop—owns the outer sandbox and its security policy.
+2. The small **MCP App document** asks the host for permission to reach and, in default mode, frame the workbench origin.
+3. The **mcp-vscode gateway** exposes only the routes needed to reach the private runtime.
+4. The **OpenVSCode process** runs on the MCP server machine, binds to loopback, opens the configured workspace, and connects its bridge extension back to the MCP server.
 
 ```mermaid
 flowchart LR
-    H["MCP host"] <-->|"stdio or Streamable HTTPS"| S["MCP VS Code server"]
-    H --> A["Sandboxed MCP App view"]
-    A -->|"nested iframe on an allowed frameDomain"| V["Bundled OpenVSCode workbench"]
-    S --> W["Confined workspace"]
-    S --> T["Shared PTYs"]
-    V <-->|"authenticated local WebSocket"| B["Bridge extension"]
-    B <--> S
-    V --> W
-    B --> T
+    H["MCP host"] <-->|"stdio or Streamable HTTPS"| S["mcp-vscode server"]
+    H --> A["sandboxed MCP App"]
+
+    A -->|"default: allowed frameDomains"| I["OpenVSCode iframe"]
+    A <-->|"opt-in: authenticated /stream WebSocket"| C["pixel canvas"]
+    A -->|"honest fallback: openLink"| X["separate browser tab"]
+
+    I --> G["browser-reachable gateway origin"]
+    X --> G
+    C <-->|"JPEG frames + input"| B["server-side system Chromium"]
+    B --> O["loopback OpenVSCode"]
+    G --> O
+    O <-->|"authenticated /bridge WebSocket"| S
+    S --> W["confined workspace and PTYs"]
+    O --> W
 ```
 
-The OpenVSCode process binds only to loopback. A gateway exposes it under a random, high-entropy path, avoiding third-party-cookie authentication inside the MCP sandbox. Remote MCP deployments must use TLS and bearer authentication.
+The default iframe and browser-tab paths deliver OpenVSCode directly. Experimental streaming launches an existing Edge, Chrome, or Chromium on the server, points it at that same OpenVSCode runtime, and transports its pixels and user input. The canvas is a remote display, not another editor implementation.
 
-## How the editor renders
+## Rendering modes
 
-MCP VS Code automatically picks the best rendering strategy the host allows, in a fixed order, with **nothing to configure**: no CLI flag, no environment variable, no tool input, and no persisted preference influences the choice. The probe (`src/app/tier.ts`) is driven only by the live `sessionPayload()` (`gatewayOrigin`, `ideUrl`, `uiToken`, `assetsUrl`, `openVscode.state`) and the DOM, re-run for every session.
-
-### The three tiers, in the order they are actually tried
-
-1. **`native` — tried first.** Requires *both* the authenticated `/ui` WebSocket to open *and* the static asset manifest at `/assets/manifest.json` to be fetchable (a 5 s budget). If both succeed, Monaco (editor) and xterm (terminal) render directly inside this document, talking to the gateway over `/ui`. This tier needs only `connectDomains` and `resourceDomains` — it works even in hosts (Claude Desktop, today) that silently drop `frameDomains`, because it never asks to frame anything.
-2. **`embedded` — tried only if `native` fails.** The app points a same-document iframe at the OpenVSCode workbench URL and waits (6 s, extended while the runtime reports `state === "starting"`) for a `postMessage` liveness marker (`mcp-vscode:workbench-alive`) injected into the proxied workbench HTML. A CSP-blocked frame fires neither `load` nor `error`, so only that positive message counts as success; a timeout is treated as "blocked", never as "still loading". On success, the real OpenVSCode workbench is shown in the iframe.
-3. **`browser` — the terminal fallback, always reachable.** If neither of the above committed, the app renders an "open in your browser" card with `app.openLink({ url: ideUrl })`, a selectable URL, and a **Retry** button that re-runs the whole probe from `native`.
-
-**Correction to a common misreading of the underlying issue:** the order is native → embedded → browser, and it is fixed — never reordered or skipped by configuration. In particular, *a host blocking iframe framing does not, by itself, cause `native` to be selected*: `native` is decided first, before framing is ever probed, purely from the `/ui` socket and `/assets` bundle. A host that blocks framing but serves those two lands on `native` regardless of framing. Framing is only probed once `native` has already failed, and blocked framing at that point (with no native surface available) is what produces `browser` — not `native`.
-
-### What each tier can and cannot do
-
-| Capability | `native` | `embedded` | `browser` |
+| Mode | Selection | Required host capability | What the user sees |
 | --- | --- | --- | --- |
-| Browse the file tree, open/edit/save files | ✅ Monaco over `/ui` (falls back to `callServerTool` if the socket is refused) | ✅ real workbench | ✅ real workbench, separate tab |
-| Terminal | ✅ xterm over `/ui` (degrades to polled reads if the socket is refused) | ✅ | ✅ |
-| Webviews, extension UI (custom panels), Markdown preview | ❌ | ✅ | ✅ |
+| `embedded` | Default when the host approves the declared workbench origin and the liveness probe succeeds | `frameDomains` for the nested document | Genuine OpenVSCode inside the MCP App |
+| `stream` | Only when `MCP_VSCODE_RENDER_MODE=stream` | A reachable WebSocket allowed by `connectDomains`; no nested-frame grant | Genuine OpenVSCode rendered by server-side Chromium and drawn as pixels in the MCP App |
+| `browser` | Honest fallback when the requested inline mode is denied, unreachable, or unavailable | Host-supported `openLink`, or a normal link in the debug page | The same genuine OpenVSCode workbench in a separate tab |
 
-Webviews, extension UI, and Markdown preview exist **only** in `embedded` and `browser`. Both load the real OpenVSCode workbench, whose webview host relies on a service worker that must be same-origin with the sandbox/browser document it runs inside. `native` renders Monaco/xterm directly in the MCP App's own document, so there is no second same-origin document for that service worker to attach to — this is a structural limit of the tier, not a missing feature, and it is out of scope for this project to change (see issue #10 §9).
+`probing` is a temporary UI state, not a renderer.
 
-### Nothing is configurable
+### Default behavior: iframe or browser
 
-There is no CLI flag, environment variable, tool input, or persisted setting that selects or biases the tier — only the capabilities the host has actually granted (probed live, every session) and the DOM. Re-probing from `native` happens automatically when the gateway origin changes (for example after a restart on a new ephemeral port), when the `/ui` transport gives up after repeated reconnect failures, or when the user presses **Retry** on the `browser` card.
+With no render-mode environment variable, the App:
 
-### macOS side benefit
+1. waits for the bundled OpenVSCode runtime;
+2. compares the workbench origin with the effective `frameDomains` reported by the host when that information is available;
+3. skips iframe navigation immediately when the host explicitly denied the origin;
+4. otherwise navigates the iframe and waits for the injected `mcp-vscode:workbench-alive` message;
+5. commits `embedded` only after that positive signal; or
+6. shows the `browser` card with the exact policy, network, or runtime reason.
 
-Upstream OpenVSCode Server publishes no `darwin` server build (see "Run from npm" below), so the `embedded` and `browser` tiers — which both need a real OpenVSCode workbench to point at — are unavailable on macOS. Because `native` never depends on OpenVSCode being installed or running (it only needs the gateway's own `/ui` socket and `/assets` bundle, both served directly by the MCP VS Code process), the app still reaches `native` automatically on macOS, with no switch, flag, or workaround required.
+A CSP-blocked iframe can emit neither a useful `load` nor `error` event, so a plain iframe event is not treated as success. The liveness timeout prevents a permanent blank view.
+
+An MCP server's CSP declaration is a permission request, not a way to overrule the host. A host may approve it, restrict it, or deny it. CORS headers on mcp-vscode cannot repair a `frame-src` decision made by the outer host.
+
+### Experimental streaming
+
+Set:
+
+```text
+MCP_VSCODE_RENDER_MODE=stream
+```
+
+Streaming deliberately replaces the iframe decision for that process; it is not an automatic fallback. If streaming cannot start, the App reports the failure and moves to the honest browser option rather than silently selecting a different editor.
+
+The server:
+
+- discovers an existing Microsoft Edge, Google Chrome, or Chromium installation, or uses `MCP_VSCODE_STREAM_BROWSER`;
+- launches it headlessly with a dedicated ephemeral user-data directory;
+- when the POSIX server runs as root with Chromium's sandbox enabled, reads the fixed `node` account from `/etc/passwd`, transfers ownership of that private profile, and drops only the Chromium child to its non-zero uid/gid;
+- points Chromium's working directory, `HOME`, `TMPDIR`, and XDG directories into that same ephemeral profile instead of inheriting the server account's paths;
+- binds its Chrome DevTools Protocol listener to `127.0.0.1` only;
+- navigates to a server-selected internal OpenVSCode URL—the App cannot navigate Chromium or issue arbitrary DevTools commands;
+- emits JPEG screencast frames at up to 12 frames per second;
+- accepts bounded resize, pointer, wheel, keyboard, and text-input messages; and
+- permits one active viewer.
+
+The `/stream` WebSocket uses its own random 256-bit bearer token. Both the tokenized stream URL and the high-entropy `/ide/<key>` URL are excluded from model-visible tool text and `structuredContent`; they are delivered to the MCP App through tool-result `_meta` only. Logs do not contain the stream token.
+
+Streaming is useful when a host grants `connectDomains` but refuses `frameDomains`, which is the behavior observed with locally configured Claude Desktop stdio connectors in the test documented in [the upstream report draft](docs/upstream-frame-domains-report.md).
+
+Streaming remains experimental:
+
+- JPEG frames consume more CPU and bandwidth and feel less immediate than a direct iframe.
+- There is no audio and only one viewer.
+- Basic mouse, keyboard, wheel, and paste input work; clipboard copy and complex IME composition are incomplete.
+- A system Chromium-family browser is an additional prerequisite. The project does not download or bundle one for this mode.
+- The gateway WebSocket must be browser-reachable. Streaming does not make a private Fly Machine port magically reachable.
+
+### Failure means failure
+
+All three displayed outcomes refer to the real OpenVSCode runtime. If that runtime is missing or failed, there is no editor UI to show. File, Git, and terminal MCP tools may still operate where applicable, but editor/diagnostics/command/extension tools that require the live bridge fail explicitly.
+
+There is no special macOS editor fallback: without an OpenVSCode Server runtime, neither embedding, streaming, nor the external-browser view can provide the workbench.
+
+## Configuration
+
+### User-facing environment variables
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `MCP_VSCODE_WORKSPACE` | Process working directory | Absolute workspace root. Prefer setting this explicitly. `--workspace` takes precedence. |
+| `MCP_VSCODE_OPENVSCODE_ROOT` | Platform runtime package or bundled runtime | Override the OpenVSCode runtime directory. `--openvscode-root` takes precedence. |
+| `MCP_VSCODE_RENDER_MODE` | `default` | Set exactly `stream` to enable experimental genuine-workbench pixel streaming. `default`, empty, or unset uses iframe/browser behavior. Other values fail startup. |
+| `MCP_VSCODE_STREAM_BROWSER` | Auto-discovery | Absolute path to Edge, Chrome, or Chromium for streaming. |
+| `MCP_VSCODE_STREAM_NO_SANDBOX` | `0` | Set `1` or `true` only as an explicit last resort when a locked-down container cannot run Chromium's own sandbox. On POSIX, a root mcp-vscode process instead drops only Chromium to a safe `node` account by default. |
+
+FLUJO-managed hosted children may also receive `FLUJO_MCP_APP_RUNTIME_REGISTER_URL` and `FLUJO_MCP_APP_RUNTIME_REGISTER_TOKEN`. Those are short-lived internal broker capabilities, not user settings. mcp-vscode proves possession, registers an allowlisted route manifest, clears both variables before OpenVSCode starts, and never exposes the bearer to the workbench.
+
+### Claude Desktop example
+
+Default mode honestly falls back to a browser when the tested Claude Desktop host declines the local loopback `frameDomains` request:
+
+```json
+{
+  "mcpServers": {
+    "vscode": {
+      "command": "npx",
+      "args": ["-y", "@mario.andreschak/mcp-vscode@0.2.2", "--stdio"],
+      "env": {
+        "MCP_VSCODE_WORKSPACE": "C:\\path\\to\\repository"
+      }
+    }
+  }
+}
+```
+
+To test genuine inline streaming instead:
+
+```json
+{
+  "mcpServers": {
+    "vscode": {
+      "command": "npx",
+      "args": ["-y", "@mario.andreschak/mcp-vscode@0.2.2", "--stdio"],
+      "env": {
+        "MCP_VSCODE_WORKSPACE": "C:\\path\\to\\repository",
+        "MCP_VSCODE_RENDER_MODE": "stream",
+        "MCP_VSCODE_STREAM_BROWSER": "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe"
+      }
+    }
+  }
+}
+```
+
+The browser-path override is optional when discovery finds an installed browser. Host behavior changes over time; re-run the [manual matrix](docs/manual-test-matrix.md) against the exact Claude Desktop version rather than treating the current observation as permanent.
+
+## FLUJO and Fly.io deployment
+
+A user can visit one human-facing site such as `try.flujo.com.co`, while the browser uses additional security origins behind the scenes. A sandboxed MCP App and its nested workbench cannot safely be collapsed into one literal browser origin merely to make deployment look simpler.
+
+For a FLUJO-managed stdio child, the runtime-broker handshake solves the private-port problem:
+
+1. FLUJO gives the child a one-use loopback registration capability.
+2. mcp-vscode proves possession of that capability and registers only its random `/ide/<key>` prefix, including the workbench's HTTP and WebSocket traffic.
+3. When streaming is enabled, it additionally registers only the exact `/stream` WebSocket route.
+4. The broker returns a browser-reachable per-App HTTPS origin. mcp-vscode uses that origin in MCP App CSP metadata and App-only result metadata instead of advertising `127.0.0.1` to the visitor.
+5. The external proxy keeps `/mcp`, `/bridge`, `/healthz`, `/app`, `/session.json`, and the temporary proof route private.
+
+The hosted deployment still needs:
+
+- wildcard DNS and TLS for its per-App origin scheme;
+- HTTP and WebSocket proxying for the random OpenVSCode prefix;
+- WebSocket proxying for `/stream` when experimental streaming is enabled;
+- preserved `Upgrade`, `Host`, `Origin`, and `Referer` behavior expected by the sandbox and workbench; and
+- a browser-reachable `https:` origin so the corresponding stream URL is `wss:`.
+
+For streaming on Fly, install Edge, Chrome, or Chromium in the Machine image. Prefer running the whole container unprivileged. If FLUJO must run mcp-vscode as root, the image must contain exactly one `node` account with a non-zero uid and gid and a safe shared `/tmp` (root-owned, traversable, and sticky when group/world-writable); mcp-vscode creates the high-entropy profile under that ancestor, chowns only the profile, and spawns only the browser under `node` with the sandbox intact. Missing or unsafe account/temp-directory data produces a visible streaming-unavailable error. It never silently adds `--no-sandbox`. `MCP_VSCODE_STREAM_NO_SANDBOX=1` remains an explicit last-resort security tradeoff, not ordinary deployment configuration.
+
+If mcp-vscode is deployed remotely without FLUJO's broker, `--public-url` must name an equivalent browser-reachable gateway origin and the reverse proxy must carry the same workbench HTTP/WebSocket and optional `/stream` WebSocket traffic. CORS settings alone cannot replace routing.
 
 ## Gateway HTTP surface
 
-The same HTTP(S) server used for `/mcp` also exposes:
+The local gateway serves:
 
-| Route | Auth | Purpose |
+| Route | Authentication/exposure | Purpose |
 | --- | --- | --- |
-| `GET /healthz` | none | Liveness probe. |
-| `GET /session.json` | `?token=` (if `--auth-token` set) | JSON session payload (workspace, OpenVSCode, bridge, `uiToken`, `assetsUrl`). |
-| `GET /app` | `?token=` (if `--auth-token` set) | The MCP App HTML shell. |
-| `ALL /mcp` | `Authorization: Bearer` (if `--auth-token` set) | Streamable HTTP MCP transport. |
-| `GET /assets/*` | none (public, read-only, static bundle) | Monaco/xterm/UI bundle for a future native renderer. Reachable even before OpenVSCode finishes starting. |
-| `GET /ide/<random>/...` | none beyond the unguessable path | Proxied OpenVSCode workbench. |
-| `WS /bridge` | first-message `{ type: "hello", token }` | The VS Code bridge extension's JSON-RPC channel. |
-| `WS /ui` | `?token=` query parameter | Direct JSON-RPC channel (same framing as `/bridge`) for workspace/terminal/editor operations, bypassing the VS Code extension. Loopback-only, single client, reuses the same `bridgeToken` — see [SECURITY.md](SECURITY.md). |
+| `GET /healthz` | Local deployment policy | Liveness and OpenVSCode/bridge state |
+| `GET /session.json` | `?token=` when `--auth-token` is configured | Debug-browser session payload |
+| `GET /app` | `?token=` when `--auth-token` is configured | Debug version of the MCP App document |
+| `ALL /mcp` | `Authorization: Bearer` when configured | Streamable HTTP MCP transport |
+| `HTTP/WS /ide/<random>/...` | High-entropy per-process path; narrowly brokered in FLUJO | Proxied genuine OpenVSCode workbench, assets, APIs, and sockets |
+| `WS /bridge` | Authenticated bridge handshake | OpenVSCode bridge extension JSON-RPC channel; not brokered publicly by FLUJO |
+| `WS /stream` | Independent token in query; one viewer; only when enabled | Experimental JPEG-frame and input channel |
+| `GET /.well-known/flujo/mcp-app-runtime` | Temporary one-use FLUJO proof; then disabled | Hosted runtime registration only |
 
-`uiToken` in the session payload is currently identical to the bridge token (one shared secret, zero new configuration, per the design in issue #6). `assetsUrl` is `${gatewayOrigin}/assets`.
+The brokered public origin exposes only the routes explicitly registered for the MCP App, not this entire local surface.
 
 ## Capabilities
 
-- Self-hosted Code OSS workbench rendered inside the MCP App sandbox.
-- Human editing, navigation, source control, commands, extensions, and terminal interaction.
-- Live editor state, selections, dirty buffers, diagnostics, and file changes visible to MCP tools.
-- Shared terminal sessions using the target-native PTY bundled with OpenVSCode, with a pipe-based fallback.
+- Genuine self-hosted Code OSS/OpenVSCode workbench.
+- Human editing, navigation, source control, commands, extensions, webviews, and terminal interaction.
+- Live editor state, selections, dirty buffers, diagnostics, and file changes visible to MCP tools through the OpenVSCode bridge.
+- Shared terminal sessions using a target-native PTY where available, with a pipe-based fallback.
 - Workspace confinement with traversal and symlink-escape protection.
-- Conflict-safe file writes using SHA-256 version tokens.
+- Conflict-safe file writes using SHA-256 version hashes.
 - stdio and Streamable HTTP/HTTPS transports from the same executable.
-- Generic `vscode_execute_command` escape hatch for every command registered in the live workbench.
+- Generic `vscode_execute_command` escape hatch for commands registered in the live workbench.
 
-The server currently exposes 27 tools across these groups:
+The server exposes 27 tools across these groups:
 
 | Group | Tools |
 | --- | --- |
@@ -101,7 +220,7 @@ The server currently exposes 27 tools across these groups:
 | Terminals | `terminal_create`, `terminal_list`, `terminal_read`, `terminal_write`, `terminal_resize`, `terminal_kill` |
 | Git | `git_status`, `git_diff`, `git_run` |
 
-Destructive and open-world tools are annotated accordingly so compatible MCP hosts can apply their approval policy.
+Editor, diagnostics, command, and extension tools always target the genuine OpenVSCode bridge. Destructive and open-world tools are annotated so compatible MCP hosts can apply their approval policy.
 
 ## Install a standalone release
 
@@ -119,54 +238,25 @@ Linux x64 or ARM64:
 ./bin/mcp-vscode --stdio --workspace /absolute/path/to/repository
 ```
 
-The archive contains its own Node.js and OpenVSCode runtimes. It does not require VS Code, Node.js, Docker, or a system-wide package installation.
+The archive contains its own Node.js and OpenVSCode runtimes. Default iframe/browser operation does not require VS Code, Node.js, Docker, or a system-wide package installation. Experimental streaming additionally requires an installed Chromium-family browser.
 
 ## Run from npm
 
 With Node.js 22 or newer, `npx` starts the bundled stdio server on Windows x64, Linux x64, and Linux ARM64:
 
 ```powershell
-npx -y @mario.andreschak/mcp-vscode@0.2.1 --stdio --workspace "C:\path\to\repository"
+npx -y @mario.andreschak/mcp-vscode@0.2.2 --stdio --workspace "C:\path\to\repository"
 ```
 
 ```bash
-npx -y @mario.andreschak/mcp-vscode@0.2.1 --stdio --workspace "/path/to/repository"
+npx -y @mario.andreschak/mcp-vscode@0.2.2 --stdio --workspace "/path/to/repository"
 ```
 
-For MCP clients that configure the workspace through an environment variable:
+Pin the workspace explicitly. Without `--workspace` or `MCP_VSCODE_WORKSPACE`, the server uses its process working directory and reports that choice on stderr. Do not accidentally expose a home directory, volume root, or unrelated checkout.
 
-```json
-{
-  "mcpServers": {
-    "vscode": {
-      "command": "npx",
-      "args": ["-y", "@mario.andreschak/mcp-vscode@0.2.1", "--stdio"],
-      "env": {
-        "MCP_VSCODE_WORKSPACE": "C:\\path\\to\\repository"
-      }
-    }
-  }
-}
-```
+`@mario.andreschak/mcp-vscode` declares optional platform packages for Windows x64, Linux x64, and Linux ARM64, so npm downloads only the matching OpenVSCode runtime. No Darwin runtime package is published.
 
-Pin the workspace explicitly. With neither `--workspace` nor `MCP_VSCODE_WORKSPACE`, the server falls back to the working directory it was spawned in and reports that fallback on stderr. Hosts that spawn MCP servers from a mounted volume root (for example `/data` on Fly.io) would otherwise expose that whole volume as the workspace, including root-owned entries such as `lost+found`. Such entries are ignored, and a directory the server may not read no longer aborts startup, but an explicit workspace keeps the file watcher scoped to the repository you meant.
-
-`@mario.andreschak/mcp-vscode` itself contains no editor runtime. It declares one `optionalDependencies` entry per supported platform — `@mario.andreschak/mcp-vscode-win32-x64`, `-linux-x64`, and `-linux-arm64` — each gated by `os`/`cpu`, so npm downloads only the OpenVSCode runtime matching the host. macOS is not supported: upstream publishes no darwin server build.
-
-Example MCP client configuration:
-
-```json
-{
-  "mcpServers": {
-    "vscode": {
-      "command": "/opt/mcp-vscode/bin/mcp-vscode",
-      "args": ["--stdio", "--workspace", "/work/my-repository"]
-    }
-  }
-}
-```
-
-Calling `vscode_open` renders the workbench. The app requests fullscreen mode when the user selects **Fullscreen**.
+Calling `vscode_open` opens the MCP App. The **Fullscreen** button requests the host's fullscreen display mode; the host decides whether to grant it.
 
 ## Run over HTTPS
 
@@ -183,22 +273,19 @@ Calling `vscode_open` renders the workbench. The app requests fullscreen mode wh
   --key /run/secrets/tls.key
 ```
 
-The MCP endpoint is `https://editor.example.com:8443/mcp`. Binding beyond loopback is rejected unless both TLS and a bearer token are configured.
+The MCP endpoint is `https://editor.example.com:8443/mcp`. Binding beyond loopback is rejected unless both TLS and a bearer token are configured. A TLS-terminating reverse proxy may instead front a loopback HTTP child, but its public URL and WebSocket routing must be correct.
 
 ## MCP host requirements
 
-The host must support the stable MCP Apps extension `io.modelcontextprotocol/ui` and:
+The host must support the stable MCP Apps extension `io.modelcontextprotocol/ui` and `text/html;profile=mcp-app` resources.
 
-- `text/html;profile=mcp-app` resources;
-- the declared `frameDomains`, `connectDomains`, and `resourceDomains`;
-- nested iframe scripts, workers, WebSockets, and same-origin behavior;
-- a sufficiently large inline container or fullscreen display mode.
+For default inline embedding it must honor the declared `frameDomains` and permit the framed workbench's own scripts, workers, service workers, assets, and WebSockets. The current MCP App bundle is self-contained, so it does not request `resourceDomains`; that grant would cover resources loaded directly by the App and would not authorize a nested workbench frame. If the host restricts the frame grant, the App reports that decision and offers the browser path.
 
-If a host blocks the OpenVSCode frame, the app displays the exact runtime or policy error instead of silently opening an external browser tab.
+For experimental streaming it must permit the declared gateway WebSocket through `connectDomains`, preserve tool-result `_meta` for the App, and support ordinary canvas image decoding. Streaming does not require `frameDomains`.
 
 ## Build from source
 
-Requirements for development only: Node.js 22+.
+Requirements for development: Node.js 22+. A system Chromium-family browser is optional and is used only by the real streaming integration test when present.
 
 ```bash
 npm ci
@@ -217,77 +304,65 @@ npm run package:standalone -- win32-x64
 npm run npm:platform-package -- linux-x64
 ```
 
-`npm run npm:platform-package -- <target>` stages the publishable runtime package for one platform in `platform-packages/<target>/`, using whichever runtime is currently installed in `runtime/`. It refuses to run when `runtime/openvscode-runtime.json` reports a different target, so a Linux runtime can never be published under the Windows package. `npm run npm:prepare-manifest` stages the platform-neutral dispatcher manifest that pins those packages, and `npm run npm:verify-runtime` asserts the dispatcher stays free of `os`/`cpu` gates and of the bundled `runtime` directory.
+`npm run typecheck` covers the Node server, MCP App browser code, and bridge extension. `npm test` exercises unit/security policy, while `npm run test:integration` includes the gateway and real system-browser screencast smoke test (skipped when no browser is installed).
 
-The runtime fetcher pins OpenVSCode `1.109.5` and verifies upstream Linux SHA-256 digests before extraction. Native Windows builds pin and verify upstream commit `4ffe2270acdf711bbefecc3e8c79f4b3631640e5`, then invoke Code OSS's `vscode-reh-web-win32-x64` build target. Building that runtime locally requires Windows x64, Git, Node.js 22.21.1 or newer, and the Visual Studio 2022 C++ build tools with `Microsoft.VisualStudio.Component.VC.Runtimes.x86.x64.Spectre`. Release archives contain the resulting runtime and do not require those development tools. Runtime and standalone output directories are ignored by Git.
+The runtime fetcher pins OpenVSCode `1.109.5` and verifies upstream Linux SHA-256 digests before extraction. Windows builds pin the configured upstream commit and invoke Code OSS's Windows remote-web build target. Runtime and standalone output directories are ignored by Git.
 
 ## Publish a release to npm
 
-Release CI publishes automatically once npm trusted publishing authorizes this repository's `release.yml` workflow and the GitHub `npm-publish` environment is configured. To publish by hand instead — for example when the account requires an interactive passkey — download the `*.npm.tgz` assets and their `.sha256` sidecars from the GitHub Release into `release-artifacts-v<version>/`, then run:
+Release CI publishes the platform runtime packages before the platform-neutral dispatcher. To verify or publish previously built release artifacts:
 
 ```bash
-npm run npm:publish -- release-artifacts-v0.2.1 --dry-run   # verify only, upload nothing
-npm run npm:publish -- release-artifacts-v0.2.1             # publish
+npm run npm:publish -- release-artifacts-v0.2.2 --dry-run
+npm run npm:publish -- release-artifacts-v0.2.2
 ```
 
-Authentication happens **in the same terminal**: when no npm session exists, the publish script hands the terminal to `npm login --auth-type=web`, which prints a URL and opens the browser for passkey / WebAuthn sign-in, then resumes publishing once the session is stored. Nothing else is required.
+Useful authentication commands:
 
 ```bash
-npm run npm:whoami                                          # check the current identity
-npm run npm:login                                            # sign in ahead of time (optional)
-npm run npm:publish:wait -- release-artifacts-v0.2.1         # don't log in here; poll for a login from another terminal
-npm run npm:publish -- release-artifacts-v0.2.1 --no-login   # fail fast when no session exists (CI / token auth)
+npm run npm:whoami
+npm run npm:login
+npm run npm:publish:wait -- release-artifacts-v0.2.2
+npm run npm:publish -- release-artifacts-v0.2.2 --no-login
 ```
 
-`npm run npm:publish` verifies every tarball before asking for credentials, so a bad artifact set fails before any browser opens. It publishes the three runtime packages before the dispatcher that pins them, skips versions already on the registry so an interrupted run can simply be re-run, and refuses to upload a tarball whose internal `package.json` disagrees with the name and version its filename claims. It never builds a tarball: the published bytes are exactly the audited release artifacts.
+The publish script verifies artifact hashes and internal package names/versions before authentication. It skips versions already present so interrupted runs are resumable; it does not rebuild the audited tarballs.
 
 ## Publish to the MCP Registry
 
-The [MCP Registry](https://modelcontextprotocol.io/registry/quickstart) stores metadata only, so the npm packages must be live **before** this step:
+The [MCP Registry](https://modelcontextprotocol.io/registry/quickstart) stores metadata only, so the npm package must already be live:
 
 ```bash
-npm run mcp:validate    # check server.json + npm state, download nothing else, publish nothing
-npm run mcp:publish     # log in if needed, then publish server.json
+npm run mcp:validate
+npm run mcp:publish
 ```
 
-`npm run mcp:publish` (`scripts/publish-mcp.mjs`) works through the quickstart steps in order, and refuses to continue if any of them is off:
+The script checks `package.json`, `server.json`, the published npm metadata, namespace authorization, and the pinned publisher binary before upload. Registry versions are immutable; existing versions are skipped unless `--force` is passed.
 
-- `server.json` and `package.json` must agree — `mcpName` versus `name`, and one shared version across `package.json`, `server.json` and its npm package entry.
-- `@mario.andreschak/mcp-vscode@<version>` must already be on npm, and the **published** package must declare the matching `mcpName`. That mismatch is what produces the registry's "Registry validation failed for package", so it is checked against the registry copy rather than the working tree.
-- With GitHub authentication the server name must start with `io.github.<user>/`, which is verified before a browser opens.
-- The registry JWT that GitHub login mints carries the namespaces it may publish (`io.github.<authorized-account>/*`). That claim is compared with `server.json`'s name **before** the upload, because the device flow silently authorizes whichever account your browser happens to be signed in as — publishing `io.github.mario-andreschak/...` with, say, the `flujo-app` account can only ever return 403, and no amount of re-authenticating fixes it.
-- Versions already listed in the registry are skipped (registry versions are immutable); pass `--force` to attempt the upload anyway.
-- The pinned `mcp-publisher` 1.8.0 binary is downloaded into `.tools/` (git-ignored) and verified against a recorded SHA-256 digest — no Homebrew, `curl | tar` pipeline or Go toolchain needed. Set `MCP_PUBLISHER_BIN` to use your own build.
-- `mcp-publisher validate` runs first, so a malformed `server.json` fails before authentication.
-
-Authentication again happens **in the same terminal**: the GitHub device-code flow prints a URL and a code, and publishing continues automatically once you approve it. A saved registry token is reused while it is still valid (they live only ~5 minutes), and an *expired* token triggers one silent re-login and retry. A *permission* failure never does — it aborts with the authorized identity and its granted namespaces, so the script can no longer appear to hang at `Waiting for authorization...` behind a second device code nobody was told to enter.
-
-To publish as a specific account without fighting the browser session, hand the flow a personal access token (scopes `read:user`, `read:org`):
-
-```powershell
-$env:MCP_GITHUB_TOKEN = "<pat of the namespace owner>"; npm run mcp:publish
-```
+Authentication options include:
 
 ```bash
-npm run mcp:publish -- --login github-oidc                       # GitHub Actions OIDC
+npm run mcp:publish -- --login github-oidc
 npm run mcp:publish -- --login dns --domain example.com --private-key <hex>
-npm run mcp:publish -- --relogin                                 # force a fresh login
-npm run mcp:publish -- --token <github-pat>                       # skip the device flow, publish as that account
-npm run mcp:publish -- --no-login                                # require an existing token, never prompt
-npm run mcp:publish -- --registry http://localhost:8080          # publish against a local registry
+npm run mcp:publish -- --relogin
+npm run mcp:publish -- --token <github-pat>
+npm run mcp:publish -- --no-login
+npm run mcp:publish -- --registry http://localhost:8080
 ```
-
-Verify a publish with `curl "https://registry.modelcontextprotocol.io/v0.1/servers?search=io.github.mario-andreschak/mcp-vscode"`.
 
 ## Security model
 
-- Every file path is resolved beneath one configured workspace root. Existing symlinks are canonicalized before access.
+- Every file path is resolved beneath one configured workspace root; existing symlinks are canonicalized before access.
 - The workspace root cannot be deleted through MCP tools.
-- OpenVSCode listens on loopback and is exposed through an unguessable per-process path.
-- The bridge uses a separate 256-bit token and accepts one active bridge connection.
-- Remote listeners require HTTPS and bearer authentication.
-- Git hooks are disabled for `git_run`; arbitrary VS Code commands and shell input remain powerful and should require host approval.
-- Unsaved text documents up to 2 MB are mirrored into the MCP-visible overlay. Larger dirty documents remain available through editor commands but are not copied on every keystroke.
+- OpenVSCode listens on loopback and is exposed under a random high-entropy path.
+- The OpenVSCode bridge uses a separate random token and accepts one active bridge connection.
+- The stream channel uses an independent random token, exposes no DevTools endpoint, permits one viewer, and keeps its credential in app-only result metadata.
+- Server-side streaming Chromium uses a loopback DevTools listener and an ephemeral profile that is removed on shutdown or crash.
+- On POSIX root deployments, sandboxed Chromium alone is spawned as the unprivileged `node` uid/gid; its `HOME` and XDG paths are confined to that ephemeral profile.
+- Remote listeners require HTTPS and bearer authentication; streamed pixels and input must travel over trusted TLS/WSS routing.
+- `MCP_VSCODE_STREAM_NO_SANDBOX=1` weakens defense in depth and should not be the default answer to a container configuration problem.
+- Git hooks are disabled for `git_run`; arbitrary VS Code commands, extension installation, and shell input remain powerful and should require host approval.
+- Do not disable MCP host approvals merely because the browser UI is sandboxed. The terminal and extension host execute server-side.
 
 See [SECURITY.md](SECURITY.md) for reporting and deployment guidance.
 

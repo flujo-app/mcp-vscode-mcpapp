@@ -29,6 +29,11 @@ export interface OpenVscodeLaunch {
   shell: boolean;
 }
 
+/** Remove the random workbench route capability before a line reaches logs or diagnostics. */
+export function redactOpenVscodeLogLine(line: string, basePath: string): string {
+  return line.split(basePath).join("/ide/<app-only>");
+}
+
 export class OpenVscodeRuntime {
   readonly #core: VscodeCore;
   readonly #workspaceRoot: string;
@@ -214,15 +219,19 @@ export class OpenVscodeRuntime {
       throw new McpVscodeError("Built VS Code bridge extension not found", "BRIDGE_EXTENSION_NOT_FOUND");
     }
     const workspaceHash = createHash("sha256").update(this.#workspaceRoot).digest("hex").slice(0, 8);
-    const destination = path.join(extensionsDir, `flujo.mcp-vscode-0.1.0-${workspaceHash}`);
+    const destination = path.join(extensionsDir, `flujo.mcp-vscode-0.2.2-${workspaceHash}`);
     await cp(source, destination, { recursive: true, force: true });
   }
 
   #log(value: string): void {
     for (const line of value.split(/\r?\n/).filter(Boolean)) {
-      this.#logs.push(line);
+      // OpenVSCode commonly prints its full listening URL. The random base
+      // path is the browser's workbench capability, so keep it out of process
+      // logs and diagnostics just like the stream bearer URL.
+      const safeLine = redactOpenVscodeLogLine(line, this.#basePath);
+      this.#logs.push(safeLine);
       if (this.#logs.length > 200) this.#logs.shift();
-      process.stderr.write(`[openvscode] ${line}\n`);
+      process.stderr.write(`[openvscode] ${safeLine}\n`);
     }
   }
 }

@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import {
   platformRuntimePackage,
+  redactOpenVscodeLogLine,
   resolveOpenVscodeLaunch,
   resolvePlatformRuntimeRoot,
 } from "../src/runtime/openvscode.js";
@@ -66,4 +67,17 @@ test("an uninstalled platform runtime package resolves to undefined instead of t
   // search roots rather than crashing startup.
   assert.equal(resolvePlatformRuntimeRoot("darwin", "arm64"), undefined);
   assert.equal(resolvePlatformRuntimeRoot("linux", "riscv64"), undefined);
+});
+
+test("OpenVSCode log lines never expose the random workbench route capability", () => {
+  const secretPath = "/ide/Qd1bVpyL95OSBErRGgoYIH_fEam-dg6X";
+  const line = `Web UI available at http://127.0.0.1:3000${secretPath}/?folder=/workspace`;
+
+  const redacted = redactOpenVscodeLogLine(line, secretPath);
+
+  assert.equal(
+    redacted,
+    "Web UI available at http://127.0.0.1:3000/ide/<app-only>/?folder=/workspace",
+  );
+  assert.equal(redacted.includes("Qd1bVpyL95OSBErRGgoYIH_fEam-dg6X"), false);
 });

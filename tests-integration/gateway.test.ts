@@ -54,6 +54,10 @@ test("HTTP gateway serves MCP, proxies the workbench, and authenticates the brid
   const appResponse = await fetch(`${started.origin}/app?token=integration-token`);
   assert.equal(appResponse.status, 200);
   assert.match(await appResponse.text(), /__MCP_VSCODE_DEBUG__/);
+  const sessionResponse = await fetch(`${started.origin}/session.json?token=integration-token`);
+  assert.equal(sessionResponse.status, 200);
+  assert.equal(sessionResponse.headers.get("access-control-allow-origin"), null);
+  assert.match(sessionResponse.headers.get("cache-control") ?? "", /no-store/);
   const ideResponse = await fetch(`${started.origin}${runtime.basePath}/`, {
     headers: { accept: "text/html" },
   });

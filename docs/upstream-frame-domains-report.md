@@ -1,88 +1,128 @@
-# Upstream report draft — `frameDomains` silently dropped for local stdio connectors
+# Upstream report draft — local stdio `frameDomains` is not reflected in the effective sandbox CSP
 
-**Target:** `anthropics/claude-code#59351`
+**Proposed target:** `anthropics/claude-code#59351`
 
-**Status:** DRAFT ONLY. This file is not posted anywhere by this change. A maintainer must
-review it and post it manually to the linked issue (or open a new one if that issue has
-since been closed/redirected). Nothing in this repository automates or schedules that post.
+**Status:** DRAFT ONLY. This repository does not post, schedule, or automate this report. Before posting, a maintainer must re-run the reproduction against the current Claude Desktop release, record its exact version and OS, and update any implementation details that changed.
 
 ---
 
 ## Summary
 
-Claude Desktop's MCP App host (the sandboxed iframe/CSP layer for `text/html;profile=mcp-app`
-resources) forwards two of the three domain lists declared in a server's `_meta.ui.csp`, but
-silently drops the third:
+In the Claude Desktop build we tested, an MCP App served by a locally configured stdio connector could use its declared loopback `connectDomains` and `resourceDomains`, but the same server's declared loopback `frameDomains` was absent from the sandbox's effective `frame-src` policy.
 
-- `_meta.ui.csp.connectDomains` → forwarded into the sandbox document's `?connect-src=`
-  query parameter. **Confirmed working**: our declared `http://127.0.0.1:<port>` and
-  `ws://127.0.0.1:<port>` origins round-trip and our WebSocket/`fetch` calls succeed.
-- `_meta.ui.csp.resourceDomains` → forwarded into `?resource-src=`. **Confirmed working**:
-  images/scripts/styles/fonts/media loaded from our declared loopback origin succeed.
-- `_meta.ui.csp.frameDomains` → **not forwarded anywhere**. Reverse-engineering the host's
-  renderer bundle shows `frame-src` in the generated sandbox CSP is populated *exclusively*
-  from a host-side `approvedFrameDomains` prop. That prop is only populated for
-  directory-listed remote connectors (servers registered in Anthropic's connector
-  directory with a stable, pre-approved domain) — it is never derived from a locally
-  configured (stdio) server's own `_meta.ui.csp.frameDomains` declaration.
-- `_meta.ui.csp.baseUriDomains` similarly appears to have no effect for local connectors.
+The practical result was:
 
-**Practical effect:** a locally configured MCP server that declares `frameDomains` for its
-own loopback origin (as ours does, for its `ideUrl`) always ends up with a sandbox CSP of
-`frame-src 'self' blob: data:` — the loopback origin is never added — so any `<iframe>`
-pointed at that origin is blocked by the browser's own CSP enforcement inside the sandbox
-document. There is no error surfaced to the MCP App itself: a CSP-blocked iframe fires
-neither `load` nor `error`, so from inside the sandbox this looks indistinguishable from "the
-iframe is just slow", not "this will never load".
+- `fetch` and WebSocket connections to the declared `http://127.0.0.1:<port>` / `ws://127.0.0.1:<port>` gateway succeeded;
+- resources from that declared loopback origin succeeded; but
+- an iframe pointed at the server's genuine OpenVSCode URL was blocked by the outer sandbox CSP.
 
-## Why we are reasonably confident about the mechanism
+The MCP server cannot repair that decision with CORS, response headers, redirects, or a different iframe attribute. The outer host constructs the sandbox policy. A server declaration asks the host for permission; it does not override the host.
 
-- `connectDomains` and `resourceDomains` visibly change host-generated query parameters
-  (`connect-src=`, `resource-src=`) on the sandbox document URL, which we can observe from
-  our own served pages. `frameDomains` produces no equivalent parameter change under any
-  value we have tried.
-- The only CSP source we can find for `frame-src` in the renderer bundle is
-  `approvedFrameDomains`, which is wired to directory metadata, not to anything in the
-  per-connection `_meta.ui.csp` the server sends over MCP.
-- We worked around this by building an entirely separate, framing-free rendering tier: our
-  MCP App renders Monaco/xterm directly in its own sandboxed document and talks to our
-  gateway process purely over the already-forwarded `connect-src`/`resource-src` grants (an
-  authenticated WebSocket plus a static asset bundle). That workaround succeeds precisely
-  because it needs no `frame-src` grant at all — which is itself evidence that `frame-src`
-  is the one channel that is not honoring our declaration.
+This may be an intentional host policy rather than a protocol-parser bug. The actionable problem is that a local connector receives no clear signal explaining that its requested frame origin was declined, while the other requested domain classes work. From inside the App, a CSP-blocked iframe may produce neither a useful `load` nor `error` event, so denial looks like an indefinitely slow page.
 
-## What we are asking for
+## Minimal reproduction
 
-Either of the following would resolve the underlying gap (in order of preference):
+Use a local stdio MCP server that:
 
-1. **Honour server-declared `frameDomains` for loopback origins of locally configured
-   servers.** A locally spawned stdio server's `_meta.ui.csp.frameDomains` entry pointing at
-   its own loopback origin is inherently as trustworthy as its `connectDomains`/
-   `resourceDomains` entries already are (same server, same connection, same trust
-   boundary) — there is no additional third party being granted framing rights.
-2. **At minimum, warn instead of silently dropping.** If honouring `frameDomains` for local
-   connectors is not desired for other reasons, surface that decision to the server (e.g. via
-   a diagnostic/log channel, or by omitting the field from whatever confirms other grants)
-   rather than accepting the declaration and then not acting on it. The silent drop is what
-   makes this expensive to diagnose: from the server's side, everything it declared appears
-   accepted.
+1. starts an HTTP/WebSocket gateway on an ephemeral loopback port;
+2. returns a `text/html;profile=mcp-app` resource;
+3. declares the gateway origin in `_meta.ui.csp.frameDomains`, `connectDomains`, `resourceDomains`, and `baseUriDomains`;
+4. has the App perform a `fetch` and open a WebSocket to the gateway; and
+5. has the App create an iframe whose URL is on that same gateway origin.
 
-## What we are *not* asking for
+Expected if the requested local origin is approved:
 
-- We are not asking for `approvedFrameDomains` / directory-listing status for local
-  connectors — the existing behaviour there (reserved for reviewed, stable, directory-listed
-  domains) is reasonable as a default-deny for framing an *arbitrary remote* origin. This
-  report is specifically about the narrower case of a server's *own* loopback origin, which
-  is not a third-party framing request.
-- We are not asking for any change to how `_meta.ui.csp` is declared or shaped on our end;
-  our declaration already includes `frameDomains` today (and will keep doing so — it costs
-  nothing when dropped, and is honoured correctly by spec-compliant hosts).
+- the network checks succeed; and
+- the iframe document is permitted by `frame-src` and reports a positive liveness message.
 
-## Our current mitigation (already shipped, not blocked on this report)
+Observed in the tested Claude Desktop build:
 
-We no longer depend on this behaviour changing. MCP VS Code auto-selects a rendering tier at
-runtime — `native` (Monaco/xterm rendered directly, needs only `connectDomains` +
-`resourceDomains`) → `embedded` (the iframe strategy this report is about) → `browser` (an
-`openLink` fallback) — with no configuration required. See the README's "How the editor
-renders" section and `src/app/tier.ts`. This report exists so the underlying host behaviour
-is documented upstream, not because our own functionality depends on the fix.
+- network/resource checks succeed;
+- the loopback origin appears in the effective network/resource allowances;
+- it does not appear in the effective frame allowance; and
+- browser CSP enforcement blocks the iframe before the child document can report liveness.
+
+The reproduction should record the host's `ui/initialize` capabilities, the final sandbox CSP, the App console's CSP error, and whether the iframe generates any observable event.
+
+## Evidence from the tested build
+
+- Changing `connectDomains` and `resourceDomains` changed the corresponding host-generated sandbox allowances, and the App could demonstrate those grants with real traffic.
+- Changing the local connector's `frameDomains` did not add the loopback origin to the effective `frame-src` policy.
+- Inspection of the tested renderer bundle indicated that its frame allowance came from a host-side approved-domain list associated with reviewed/directory connectors, rather than directly from the local server declaration.
+- `baseUriDomains` also appeared not to affect the tested local connector path.
+
+These are observations about one tested implementation, not assumptions the report should project onto future releases. If the current build now returns an effective frame grant or a clear denial signal, this draft should be updated or closed.
+
+## Why this matters
+
+The MCP App in this reproduction is not trying to frame an unrelated third party. It is trying to display the OpenVSCode runtime started by the same user-approved local connector on that connector's own loopback gateway.
+
+Without a frame grant, the choices are materially worse:
+
+- open the genuine workbench in a separate browser tab;
+- run an expensive remote-display stream through the already-approved network channel; or
+- show an explicit unsupported-policy message.
+
+Building a lookalike editor is not an acceptable compatibility solution because it changes the product while preserving its name.
+
+## Requested behavior
+
+Either outcome below would make the integration deterministic.
+
+### Preferred: support an approved local frame origin
+
+Allow a locally configured, user-approved stdio connector's declared loopback `frameDomains` origin to enter the effective sandbox `frame-src` policy, subject to whatever explicit host/user approval Anthropic considers appropriate.
+
+This request is narrow:
+
+- same local connector;
+- loopback HTTP(S) origin started for that connector;
+- origin declared in the MCP App resource metadata; and
+- no request for arbitrary remote third-party framing.
+
+### Minimum: report the effective denial
+
+If local nested frames are intentionally unsupported, expose that decision clearly to the App. Possibilities include:
+
+- returning the effective approved frame-domain set in host capabilities;
+- omitting denied values from an explicit effective-CSP result;
+- emitting a host diagnostic; or
+- documenting and surfacing a stable "local frame domains unsupported" capability.
+
+The important property is that the App can distinguish policy denial from network latency without waiting for a blind timeout.
+
+## What this report is not asking for
+
+- It does not ask local connectors to receive directory/review status.
+- It does not ask the server to bypass the host sandbox.
+- It does not ask for wildcard or arbitrary remote framing.
+- It does not claim the server's CSP declaration must be accepted unconditionally; hosts may enforce stricter policy.
+- It does not ask Anthropic to support mcp-vscode's experimental streaming mode.
+
+## Current mcp-vscode behavior
+
+mcp-vscode now preserves the product boundary:
+
+- In default mode it attempts to display the genuine OpenVSCode iframe only when the host has not explicitly denied the origin, and commits it only after a positive liveness message.
+- If the host declines or silently blocks the frame, it shows an honest browser fallback and the reason. It does not substitute another editor.
+- An administrator may explicitly set `MCP_VSCODE_RENDER_MODE=stream`. In that experimental mode, server-side Edge/Chrome/Chromium renders the genuine workbench and an authenticated WebSocket carries JPEG frames and bounded input. This uses the network grant rather than a nested browsing context.
+
+Streaming is a mitigation, not resolution of the host issue. It adds a system-browser prerequisite, CPU/bandwidth cost, latency, a one-viewer limit, and incomplete clipboard/IME behavior. It also still requires a browser-reachable WebSocket route. Default inline OpenVSCode should not require those costs merely because the workbench belongs to a local stdio connector.
+
+See [How the editor renders](../README.md#rendering-modes) and the [manual host matrix](manual-test-matrix.md) for the current behavior and retest procedure.
+
+## Information to add before posting
+
+```text
+Claude Desktop version:
+Operating system and version:
+MCP Apps protocol / ext-apps version where visible:
+Exact server CSP declaration:
+Host-reported effective CSP/capabilities:
+Sandbox CSP excerpt:
+Browser console CSP error:
+Network fetch result:
+WebSocket result:
+Iframe/liveness result:
+Minimal reproduction repository or attachment:
+```

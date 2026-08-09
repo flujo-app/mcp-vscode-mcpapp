@@ -163,13 +163,10 @@ test("the caller is responsible for gating on content-type: bufferAndInjectHtmlR
   // bufferAndInjectHtmlResponse has no content-type check of its own -- it
   // always runs injectLivenessScript over the buffered body. The "never
   // injected into assets or non-HTML responses" invariant from the plan is
-  // therefore enforced by the caller via isHtmlContentType()/
-  // isMaybeHtmlDocumentRequest() *before* this function is ever invoked
-  // (asserted separately above), and by the /assets route never being
-  // proxied through this code path at all (it is served directly by
-  // createAssetsHandler, asserted in tests/assets.test.ts). This test
-  // documents that boundary precisely so a future change to either side
-  // doesn't silently widen where injection happens.
+  // therefore enforced by the OpenVSCode proxy caller via
+  // isHtmlContentType()/isMaybeHtmlDocumentRequest() before this function is
+  // invoked. This test documents that boundary precisely so a future change
+  // does not silently widen where injection happens.
   const { response, captured } = makeFakeResponse();
   const proxyResponse = makeFakeProxyResponse(200, { "content-type": "application/javascript" });
 

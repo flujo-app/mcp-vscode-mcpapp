@@ -5,9 +5,8 @@ import type { Tier } from "./tier.js";
 
 const TIER_LABEL: Record<Tier, string> = {
   probing: "Detecting…",
-  native: "Native",
+  stream: "Streamed (experimental)",
   embedded: "Embedded",
-  portable: "Portable",
   browser: "Browser",
 };
 
@@ -25,10 +24,7 @@ export class StatusBar {
   setTier(tier: Tier, reason?: string): void {
     this.#tierBadge.textContent = TIER_LABEL[tier];
     this.#tierBadge.className = `status-item tier-badge tier-badge--${tier}`;
-    // The `reason` string produced by `selectTier()` (or the equivalent
-    // logging-aware probe in `main.ts`) is surfaced as a tooltip so a
-    // human can see *why* a tier was chosen, not just which one (epic #10
-    // §7-A conformance gap).
+    // Surface the renderer decision rather than hiding policy/network failures.
     this.#tierBadge.title = reason ? `${TIER_LABEL[tier]} — ${reason}` : TIER_LABEL[tier];
   }
 

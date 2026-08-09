@@ -3,7 +3,7 @@
   "name": "io.github.mario-andreschak/mcp-vscode",
   "title": "MCP VS Code",
   "description": "A self-hosted VS Code workbench embedded as an interactive MCP App.",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "repository": {
     "url": "https://github.com/flujo-app/mcp-vscode-mcpapp",
     "source": "github"
@@ -20,7 +20,7 @@
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@mario.andreschak/mcp-vscode",
-      "version": "0.2.1",
+      "version": "0.2.2",
       "transport": {
         "type": "stdio"
       },
@@ -38,6 +38,24 @@
           "description": "Absolute path to the workspace directory exposed through VS Code and MCP tools.",
           "format": "filepath",
           "isRequired": true
+        },
+        {
+          "name": "MCP_VSCODE_RENDER_MODE",
+          "description": "Set to 'stream' to opt into experimental genuine-workbench pixel streaming; omit for normal iframe/browser behavior.",
+          "format": "string",
+          "isRequired": false
+        },
+        {
+          "name": "MCP_VSCODE_STREAM_BROWSER",
+          "description": "Optional absolute path to an installed Edge, Chrome, or Chromium executable used by experimental streaming.",
+          "format": "filepath",
+          "isRequired": false
+        },
+        {
+          "name": "MCP_VSCODE_STREAM_NO_SANDBOX",
+          "description": "Unsafe container-only escape hatch: set to 1 to launch streaming Chromium without its process sandbox.",
+          "format": "boolean",
+          "isRequired": false
         }
       ]
     }

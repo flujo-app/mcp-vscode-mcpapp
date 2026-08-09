@@ -9,14 +9,22 @@ import httpProxy from "http-proxy";
 import type { Request, Response, NextFunction } from "express";
 import type { VscodeCore } from "../core/core.js";
 import type { OpenVscodeRuntime } from "../runtime/openvscode.js";
+import { WorkbenchStreamController } from "../runtime/workbench-stream.js";
 import { createMcpServer, type McpServerContext } from "../mcp/server.js";
-import { createAssetsHandler, defaultAssetsRoot } from "./assets.js";
 import {
   bufferAndInjectHtmlResponse,
   isHtmlContentType,
   isMaybeHtmlDocumentRequest,
 } from "./inject.js";
-import { UiEditorSurface, UiSocketServer } from "./ui-socket.js";
+import {
+  clearRuntimeBrokerEnvironment,
+  FLUJO_RUNTIME_PROOF_CHALLENGE_HEADER,
+  FLUJO_RUNTIME_PROOF_HEADER,
+  FLUJO_RUNTIME_PROOF_PATH,
+  registerRuntimeWithBroker,
+  runtimeBrokerProof,
+  type RuntimeBrokerRegistration,
+} from "./runtime-registration.js";
 
 export interface GatewayOptions {
   core: VscodeCore;
@@ -27,21 +35,36 @@ export interface GatewayOptions {
   authToken?: string;
   tls?: { certPath: string; keyPath: string };
   appHtmlPath: string;
-  /** Internal-only: overrides the static asset root, for tests. Not a CLI flag. */
-  assetsRoot?: string;
+  /** Experimental, explicit opt-in; disabled unless render mode is `stream`. */
+  stream?: {
+    enabled: boolean;
+    browserExecutable?: string;
+    noSandbox?: boolean;
+  };
+  /** One-use FLUJO capability for publishing only the declared App routes. */
+  runtimeBroker?: {
+    registration: RuntimeBrokerRegistration;
+    resourceUri: string;
+  };
 }
 
 export class Gateway {
   readonly #options: GatewayOptions;
   readonly #proxy = httpProxy.createProxyServer({ ws: true, xfwd: true, changeOrigin: false });
-  readonly #uiSocket: UiSocketServer;
+  readonly #stream: WorkbenchStreamController;
   #server?: HttpServer;
   #origin = "";
+  #runtimeProofToken?: string;
 
   constructor(options: GatewayOptions) {
     this.#options = options;
-    this.#uiSocket = new UiSocketServer(options.core);
-    options.core.editorSurface.registerNative(new UiEditorSurface(this.#uiSocket));
+    this.#runtimeProofToken = options.runtimeBroker?.registration.token;
+    this.#stream = new WorkbenchStreamController({
+      enabled: options.stream?.enabled ?? false,
+      runtime: options.runtime,
+      ...(options.stream?.browserExecutable ? { browserExecutable: options.stream.browserExecutable } : {}),
+      ...(options.stream?.noSandbox !== undefined ? { noSandbox: options.stream.noSandbox } : {}),
+    });
     this.#proxy.on("proxyReq", (proxyRequest, request) => {
       if (isMaybeHtmlDocumentRequest(request.method, request.headers.accept)) {
         // Buffering the response for injection means we must never receive a
@@ -104,6 +127,24 @@ export class Gateway {
     const app = createMcpExpressApp({ host: this.#options.host });
     app.disable("x-powered-by");
 
+    // This loopback-only proof is reachable while FLUJO performs the one-use
+    // registration handshake. It is disabled immediately after that attempt.
+    app.get(FLUJO_RUNTIME_PROOF_PATH, (request, response) => {
+      const token = this.#runtimeProofToken;
+      const challenge = request.header(FLUJO_RUNTIME_PROOF_CHALLENGE_HEADER);
+      if (!token || !challenge) {
+        response.status(404).end();
+        return;
+      }
+      try {
+        response.setHeader(FLUJO_RUNTIME_PROOF_HEADER, runtimeBrokerProof(token, challenge));
+        response.setHeader("cache-control", "no-store");
+        response.status(204).end();
+      } catch {
+        response.status(400).end();
+      }
+    });
+
     app.get("/healthz", (_request, response) => {
       response.json({
         ok: true,
@@ -114,7 +155,11 @@ export class Gateway {
     });
 
     app.get("/session.json", this.#browserAuth.bind(this), (_request, response) => {
-      response.setHeader("access-control-allow-origin", "*");
+      // The standalone debug page is same-origin. Do not make this endpoint
+      // cross-origin readable: in stream mode its app-only payload contains
+      // the authenticated viewer URL.
+      response.setHeader("cache-control", "no-store");
+      response.setHeader("x-content-type-options", "nosniff");
       response.json(this.#sessionPayload());
     });
 
@@ -122,18 +167,14 @@ export class Gateway {
       try {
         const html = await readFile(this.#options.appHtmlPath, "utf8");
         const debug = `<script>window.__MCP_VSCODE_DEBUG__=${escapeInlineJson(this.#sessionPayload())}</script>`;
+        response.setHeader("cache-control", "no-store");
+        response.setHeader("x-content-type-options", "nosniff");
+        response.setHeader("referrer-policy", "no-referrer");
         response.type("html").send(html.replace("</head>", `${debug}</head>`));
       } catch (error) {
         next(error);
       }
     });
-
-    // Registered before the basePath/503 gate below: the static asset bundle
-    // must be reachable while OpenVSCode is still starting. Unauthenticated by
-    // design (public, non-secret static code fetched from a sandboxed document
-    // that cannot attach our token) — see the /ui socket for the authenticated
-    // surface.
-    app.use("/assets", createAssetsHandler({ root: this.#options.assetsRoot ?? defaultAssetsRoot }));
 
     app.all("/mcp", this.#bearerAuth.bind(this), async (request, response) => {
       const mcpServer = createMcpServer(this.#mcpContext());
@@ -210,8 +251,8 @@ export class Gateway {
         this.#options.core.bridge.handleUpgrade(request, socket, head);
         return;
       }
-      if (pathname === "/ui") {
-        this.#uiSocket.handleUpgrade(request, socket, head);
+      if (pathname === "/stream") {
+        this.#stream.handleUpgrade(request, socket, head);
         return;
       }
       if (pathname.startsWith(this.#options.runtime.basePath)) {
@@ -229,8 +270,42 @@ export class Gateway {
     });
     const address = nodeServer.address() as AddressInfo;
     const scheme = this.#options.tls ? "https" : "http";
-    this.#origin = this.#options.publicUrl?.replace(/\/$/, "")
-      ?? `${scheme}://${loopbackDisplayHost(this.#options.host)}:${address.port}`;
+    const localDisplayOrigin = `${scheme}://${loopbackDisplayHost(this.#options.host)}:${address.port}`;
+    this.#origin = this.#options.publicUrl?.replace(/\/$/, "") ?? localDisplayOrigin;
+    try {
+      if (!this.#options.publicUrl && this.#options.runtimeBroker) {
+        if (this.#options.tls) {
+          throw new Error("FLUJO's private runtime broker requires the child gateway to use loopback HTTP");
+        }
+        const registration = await registerRuntimeWithBroker({
+          broker: this.#options.runtimeBroker.registration,
+          resourceUri: this.#options.runtimeBroker.resourceUri,
+          targetOrigin: loopbackListenerOrigin(address),
+          routes: [
+            {
+              path: this.#options.runtime.basePath,
+              match: "prefix",
+              httpMethods: ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+              websocket: true,
+            },
+            ...(this.#stream.enabled
+              ? [{ path: "/stream", match: "exact" as const, websocket: true }]
+              : []),
+          ],
+        });
+        this.#origin = registration.publicOrigin;
+        process.stderr.write(
+          `[mcp-vscode] FLUJO App runtime published at ${registration.publicOrigin} (${registration.originKey})\n`,
+        );
+      }
+    } catch (error) {
+      this.#runtimeProofToken = undefined;
+      if (this.#options.runtimeBroker) clearRuntimeBrokerEnvironment();
+      await this.close().catch(() => undefined);
+      throw error;
+    }
+    this.#runtimeProofToken = undefined;
+    if (this.#options.runtimeBroker) clearRuntimeBrokerEnvironment();
     return { origin: this.#origin, port: address.port };
   }
 
@@ -239,8 +314,8 @@ export class Gateway {
   }
 
   async close(): Promise<void> {
+    await this.#stream.close();
     this.#proxy.close();
-    this.#uiSocket.close();
     if (!this.#server) return;
     await new Promise<void>((resolve, reject) => {
       this.#server?.close((error) => (error ? reject(error) : resolve()));
@@ -255,6 +330,7 @@ export class Gateway {
       runtime: this.#options.runtime,
       gatewayOrigin: this.#origin,
       appHtmlPath: this.#options.appHtmlPath,
+      stream: this.#stream,
     };
   }
 
@@ -264,8 +340,7 @@ export class Gateway {
       openVscode: this.#options.runtime.status(),
       ideUrl: this.#options.runtime.status().browserUrl,
       gatewayOrigin: this.#origin,
-      uiToken: this.#options.core.bridgeToken,
-      assetsUrl: `${this.#origin}/assets`,
+      stream: this.#stream.status(this.#origin),
     };
   }
 
@@ -305,6 +380,14 @@ function safeEqual(value: string | undefined, expected: string): boolean {
 function loopbackDisplayHost(host: string): string {
   if (host === "0.0.0.0" || host === "::") return "127.0.0.1";
   return host.includes(":") ? `[${host}]` : host;
+}
+
+function loopbackListenerOrigin(address: AddressInfo): string {
+  const host = address.address;
+  if (host === "0.0.0.0" || host === "::") {
+    return `http://127.0.0.1:${address.port}`;
+  }
+  return `http://${loopbackDisplayHost(host)}:${address.port}`;
 }
 
 function escapeInlineJson(value: unknown): string {

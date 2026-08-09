@@ -1,30 +1,35 @@
-// Renderer selection (issue #7 / #10). Order of preference:
-//   1. "native"   — Monaco + xterm rendered in this document, talking to the
-//      gateway's authenticated `/ui` WebSocket + `/assets` static bundle.
-//      Works in hosts that strip `frameDomains` (e.g. Claude Desktop today)
-//      because it only needs `connectDomains` + `resourceDomains`.
-//   2. "portable"  — the same Monaco + xterm shell, fully bundled into the
-//      MCP App and backed by standard `ui/call-tool` requests. This tier has
-//      no side HTTP/WebSocket listener and therefore works through any
-//      conforming MCP Apps host.
-//   3. "embedded"  — a legacy/debug iframe strategy: `frame.src = ideUrl`,
-//      confirmed alive via the liveness handshake
-//      (`src/http/inject.ts` / `mcp-vscode:workbench-alive`). A connected MCP
-//      App prefers portable rather than trusting an advertised `/ide` URL.
-//   4. "browser"   — no usable MCP Apps tool channel: render a
-//      "open in your browser" affordance instead of leaving a blank frame.
+// Honest renderer selection. The product is a real OpenVSCode workbench, so
+// the UI either embeds that workbench or explains why it cannot. A Monaco /
+// xterm facsimile is deliberately not a fallback: silently swapping products
+// made host-policy and deployment failures look like success.
+//
+//   1. "stream"   — explicit experimental mode: genuine OpenVSCode rendered
+//      by server-side Chromium and delivered as pixels over an authenticated
+//      connection. Never selected unless the server opted in.
+//   2. "embedded" — the genuine OpenVSCode workbench, confirmed alive via the
+//      liveness handshake (`src/http/inject.ts`).
+//   3. "browser"  — an explicit host-policy/network fallback that opens the
+//      same genuine workbench in a regular browser tab.
 //
 // `selectTier` never returns without a decision; callers are expected to
 // apply a hard watchdog on top (see `main.ts`) in case a probe hangs.
 
-export type Tier = "probing" | "native" | "embedded" | "portable" | "browser";
+import {
+  WORKBENCH_IDE_META_KEY,
+  WORKBENCH_STREAM_META_KEY,
+  type WorkbenchIdeResultMeta,
+  type WorkbenchStreamResultMeta,
+  type WorkbenchStreamStatus,
+} from "../stream/protocol.js";
+
+export type Tier = "probing" | "stream" | "embedded" | "browser";
+export type FramePolicy = "allowed" | "denied" | "unknown";
 
 export interface SessionPayload {
   workspaceRoot?: string;
   ideUrl?: string;
   gatewayOrigin?: string;
-  uiToken?: string;
-  assetsUrl?: string;
+  stream?: WorkbenchStreamStatus;
   bridge?: { connected?: boolean };
   openVscode?: {
     state?: string;
@@ -39,93 +44,33 @@ export interface TierProbeResult {
 }
 
 export interface TierProbeOptions {
-  nativeTimeoutMs?: number;
   embeddedTimeoutMs?: number;
-  portableAvailable?: boolean;
+  /** Result of comparing the workbench origin with the host-approved CSP. */
+  framePolicy?: FramePolicy;
 }
 
-export const DEFAULT_NATIVE_TIMEOUT_MS = 5_000;
+/** Merge capability URLs from App-only tool-result metadata into the public
+ * session shape. Neither URL is present in model-visible structured content. */
+export function sessionWithAppMeta(
+  payload: SessionPayload | undefined,
+  meta: Record<string, unknown> | undefined,
+): SessionPayload | undefined {
+  if (!payload) return undefined;
+  const ideMeta = meta?.[WORKBENCH_IDE_META_KEY] as WorkbenchIdeResultMeta | undefined;
+  const streamMeta = meta?.[WORKBENCH_STREAM_META_KEY] as WorkbenchStreamResultMeta | undefined;
+  return {
+    ...payload,
+    ...(ideMeta?.ideUrl ? { ideUrl: ideMeta.ideUrl } : {}),
+    ...(streamMeta?.websocketUrl && payload.stream
+      ? { stream: { ...payload.stream, websocketUrl: streamMeta.websocketUrl } }
+      : {}),
+  };
+}
+
 export const DEFAULT_EMBEDDED_TIMEOUT_MS = 6_000;
 export const LIVENESS_MARKER = "mcp-vscode:workbench-alive";
 
-/** Builds the `/ui` WebSocket URL (same origin/scheme as the gateway, `ws(s)`
- * instead of `http(s)`) with the bridge-token-derived `uiToken` as the query
- * parameter (browser `WebSocket` clients cannot set custom headers). */
-export function uiSocketUrl(gatewayOrigin: string, uiToken: string): string {
-  const url = new URL("/ui", gatewayOrigin);
-  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-  url.searchParams.set("token", uiToken);
-  return url.toString();
-}
-
-/** Tier 1 probe: the private `/ui` socket must open. Monaco and xterm are
- * bundled into the MCP App itself, so no sidecar asset request is required. */
-export async function probeNative(
-  session: SessionPayload,
-  timeoutMs = DEFAULT_NATIVE_TIMEOUT_MS,
-): Promise<boolean> {
-  if (!session.gatewayOrigin || !session.uiToken) return false;
-  try {
-    await probeSocket(uiSocketUrl(session.gatewayOrigin, session.uiToken), timeoutMs);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function probeSocket(url: string, timeoutMs: number): Promise<void> {
-  return new Promise((resolve, reject) => {
-    let socket: WebSocket;
-    let opened = false;
-    let settled = false;
-    try {
-      socket = new WebSocket(url);
-    } catch (error) {
-      reject(error);
-      return;
-    }
-    const finish = (error?: Error): void => {
-      if (settled) return;
-      settled = true;
-      window.clearTimeout(timer);
-      if (error) reject(error);
-      else resolve();
-    };
-    const timer = window.setTimeout(() => {
-      socket.close();
-      finish(new Error("native /ui socket probe timed out"));
-    }, timeoutMs);
-    socket.addEventListener(
-      "open",
-      () => {
-        opened = true;
-        // `/ui` permits one client. Wait for the probe connection's normal
-        // close handshake before mounting UiTransport, otherwise the real
-        // renderer can race the still-attached probe and be rejected as the
-        // second client (4409).
-        socket.close(1000, "native probe complete");
-      },
-      { once: true },
-    );
-    socket.addEventListener(
-      "close",
-      (event) => {
-        if (opened && event.code === 1000) finish();
-        else finish(new Error(`native /ui socket probe closed before completion (${event.code})`));
-      },
-      { once: true },
-    );
-    socket.addEventListener(
-      "error",
-      () => {
-        finish(new Error("native /ui socket probe failed"));
-      },
-      { once: true },
-    );
-  });
-}
-
-/** Legacy iframe probe: point the (already-mounted) iframe at `ideUrl` and wait for
+/** Genuine-workbench probe: point the iframe at `ideUrl` and wait for
  * the liveness `postMessage`. Resolves `false` (never rejects) on timeout or
  * frame `error` so the caller can always fall through to the browser card. */
 export function probeEmbedded(
@@ -146,6 +91,10 @@ export function probeEmbedded(
     };
     const onMessage = (event: MessageEvent): void => {
       const data = event.data as { type?: unknown } | undefined;
+      // Do not let an unrelated frame/window spoof the positive commit signal.
+      // Some test/minimal DOMs do not expose contentWindow, hence the guarded
+      // comparison rather than an unconditional one.
+      if (frame.contentWindow && event.source !== frame.contentWindow) return;
       if (data && typeof data === "object" && data.type === LIVENESS_MARKER) finish(true);
     };
     const onError = (): void => finish(false);
@@ -171,17 +120,31 @@ export async function selectTier(
   frame: HTMLIFrameElement,
   options: TierProbeOptions = {},
 ): Promise<TierProbeResult> {
-  if (await probeNative(session, options.nativeTimeoutMs ?? DEFAULT_NATIVE_TIMEOUT_MS)) {
-    return { tier: "native", reason: "the private /ui socket is reachable" };
-  }
-  if (options.portableAvailable) {
+  if (session.stream?.enabled) {
+    if (session.stream.websocketUrl
+      && session.stream.state !== "unavailable"
+      && session.stream.state !== "failed"
+      && session.stream.state !== "stopped") {
+      return {
+        tier: "stream",
+        reason: "experimental genuine-workbench pixel streaming was explicitly enabled",
+      };
+    }
     return {
-      tier: "portable",
-      reason: "the private gateway is not reachable; using bundled Monaco over the MCP Apps tool channel",
+      tier: "browser",
+      reason: session.stream.error
+        ? `experimental workbench streaming is unavailable: ${session.stream.error}`
+        : "experimental workbench streaming is enabled but no app-only stream endpoint was provided",
     };
   }
   const ideUrl = session.ideUrl ?? session.openVscode?.browserUrl;
   if (ideUrl) {
+    if (options.framePolicy === "denied") {
+      return {
+        tier: "browser",
+        reason: "the host did not approve the workbench origin in frameDomains",
+      };
+    }
     if (await probeEmbedded(frame, ideUrl, options.embeddedTimeoutMs ?? DEFAULT_EMBEDDED_TIMEOUT_MS)) {
       return { tier: "embedded", reason: "the embedded workbench frame confirmed it loaded" };
     }
@@ -191,4 +154,38 @@ export async function selectTier(
     };
   }
   return { tier: "browser", reason: "no workbench URL is available yet" };
+}
+
+/**
+ * Compare a workbench URL with the CSP grant returned by `ui/initialize`.
+ * `undefined` means the host did not report sandbox CSP capabilities, so the
+ * caller should probe rather than assuming either success or denial.
+ */
+export function framePolicyForUrl(
+  workbenchUrl: string,
+  approvedFrameDomains: readonly string[] | undefined,
+  hostReportedSandboxCsp: boolean,
+): FramePolicy {
+  if (!hostReportedSandboxCsp) return "unknown";
+  let target: URL;
+  try {
+    target = new URL(workbenchUrl);
+  } catch {
+    return "denied";
+  }
+  for (const candidate of approvedFrameDomains ?? []) {
+    if (candidate === "*") return "allowed";
+    if (candidate.startsWith(`${target.protocol}//*.`)) {
+      const suffix = candidate.slice(`${target.protocol}//*.`.length).replace(/\/$/, "");
+      const hostWithPort = target.port ? `${target.hostname}:${target.port}` : target.hostname;
+      if (hostWithPort.endsWith(`.${suffix}`)) return "allowed";
+      continue;
+    }
+    try {
+      if (new URL(candidate).origin === target.origin) return "allowed";
+    } catch {
+      // Ignore malformed values rather than widening a security decision.
+    }
+  }
+  return "denied";
 }

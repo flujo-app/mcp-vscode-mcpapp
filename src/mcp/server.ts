@@ -14,6 +14,13 @@ import { McpVscodeError, serializeError } from "../core/errors.js";
 import { runProcess } from "../core/process.js";
 import type { OpenVscodeRuntime } from "../runtime/openvscode.js";
 import {
+  WORKBENCH_IDE_META_KEY,
+  WORKBENCH_STREAM_META_KEY,
+  type WorkbenchIdeResultMeta,
+  type WorkbenchStreamResultMeta,
+  type WorkbenchStreamStatus,
+} from "../stream/protocol.js";
+import {
   terminalCreateShape,
   terminalKillShape,
   terminalReadShape,
@@ -27,32 +34,27 @@ import {
   workspaceWriteShape,
 } from "./schemas.js";
 
-const RESOURCE_URI = "ui://mcp-vscode/workbench.html";
+export const MCP_VSCODE_APP_RESOURCE_URI = "ui://mcp-vscode/workbench.html";
 
 export interface McpServerContext {
   core: VscodeCore;
   runtime: OpenVscodeRuntime;
   gatewayOrigin: string;
   appHtmlPath: string;
+  stream?: { status(gatewayOrigin?: string): WorkbenchStreamStatus };
 }
 
 export function createMcpServer(context: McpServerContext): McpServer {
   const { core, runtime } = context;
-  const server = new McpServer({ name: "mcp-vscode", version: "0.1.0" });
+  const server = new McpServer({ name: "mcp-vscode", version: "0.2.2" });
 
-  /**
-   * Routes an editor/diagnostics RPC to whichever surface is live (VS Code
-   * bridge -> native /ui renderer -> `NO_EDITOR_SURFACE`), and stamps the
-   * additive `surface` field onto the result so callers can tell fidelity
-   * apart (Phase 3 plan, issue #8, §2.4 / O1).
-   */
+  /** Editor and diagnostics tools always target the genuine OpenVSCode bridge. */
   const callEditor = async (method: string, params?: unknown, timeoutMs?: number): Promise<Record<string, unknown>> => {
-    const surface = core.editorSurface.resolve();
-    const result = await surface.call<unknown>(method, params, timeoutMs);
+    const result = await core.bridge.call<unknown>(method, params, timeoutMs);
     const base = result && typeof result === "object" && !Array.isArray(result)
       ? (result as Record<string, unknown>)
       : { value: result };
-    return { ...base, surface: surface.kind };
+    return { ...base, surface: "vscode" };
   };
 
   registerAppTool(
@@ -64,19 +66,19 @@ export function createMcpServer(context: McpServerContext): McpServer {
       inputSchema: {},
       _meta: {
         ui: {
-          resourceUri: RESOURCE_URI,
+          resourceUri: MCP_VSCODE_APP_RESOURCE_URI,
           visibility: ["model", "app"],
         },
       },
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
     },
-    async () => success(sessionPayload(context)),
+    async () => success(sessionPayload(context), appResultMeta(context)),
   );
 
   registerAppResource(
     server,
     "VS Code Workbench",
-    RESOURCE_URI,
+    MCP_VSCODE_APP_RESOURCE_URI,
     {
       description: "Self-hosted Code OSS workbench with live MCP synchronization.",
       _meta: {
@@ -85,8 +87,6 @@ export function createMcpServer(context: McpServerContext): McpServer {
           csp: {
             frameDomains: [context.gatewayOrigin],
             connectDomains: [context.gatewayOrigin, websocketOrigin(context.gatewayOrigin)],
-            resourceDomains: [context.gatewayOrigin],
-            baseUriDomains: [context.gatewayOrigin],
           },
           permissions: { clipboardWrite: {} },
         },
@@ -97,7 +97,7 @@ export function createMcpServer(context: McpServerContext): McpServer {
       return {
         contents: [
           {
-            uri: RESOURCE_URI,
+            uri: MCP_VSCODE_APP_RESOURCE_URI,
             mimeType: RESOURCE_MIME_TYPE,
             text: html,
             _meta: {
@@ -106,8 +106,6 @@ export function createMcpServer(context: McpServerContext): McpServer {
                 csp: {
                   frameDomains: [context.gatewayOrigin],
                   connectDomains: [context.gatewayOrigin, websocketOrigin(context.gatewayOrigin)],
-                  resourceDomains: [context.gatewayOrigin],
-                  baseUriDomains: [context.gatewayOrigin],
                 },
                 permissions: { clipboardWrite: {} },
               },
@@ -124,6 +122,7 @@ export function createMcpServer(context: McpServerContext): McpServer {
     inputSchema: {},
     annotations: readOnly,
     handler: async () => sessionPayload(context),
+    resultMeta: () => appResultMeta(context),
   });
 
   registerTool(server, "fs_list", {
@@ -414,6 +413,7 @@ function registerTool<Shape extends z.ZodRawShape>(
       openWorldHint?: boolean;
     };
     handler: (args: z.infer<z.ZodObject<Shape>>) => Promise<unknown>;
+    resultMeta?: () => Record<string, unknown> | undefined;
   },
 ): void {
   const register = server.registerTool.bind(server) as (...args: unknown[]) => unknown;
@@ -428,7 +428,10 @@ function registerTool<Shape extends z.ZodRawShape>(
     },
     async (args: unknown): Promise<CallToolResult> => {
       try {
-        return success(await config.handler(args as z.infer<z.ZodObject<Shape>>));
+        return success(
+          await config.handler(args as z.infer<z.ZodObject<Shape>>),
+          config.resultMeta?.(),
+        );
       } catch (error) {
         const serialized = serializeError(error);
         return {
@@ -441,11 +444,12 @@ function registerTool<Shape extends z.ZodRawShape>(
   );
 }
 
-function success(value: unknown): CallToolResult {
+function success(value: unknown, meta?: Record<string, unknown>): CallToolResult {
   const structuredContent = asObject(value);
   return {
     content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }],
     structuredContent,
+    ...(meta ? { _meta: meta } : {}),
   };
 }
 
@@ -455,13 +459,37 @@ function asObject(value: unknown): Record<string, unknown> {
 }
 
 function sessionPayload(context: McpServerContext): Record<string, unknown> {
+  const streamStatus = context.stream?.status(context.gatewayOrigin);
+  const publicStreamStatus = streamStatus
+    ? (({ websocketUrl: _secret, ...status }) => status)(streamStatus)
+    : undefined;
   return {
     ...context.core.status(),
-    openVscode: context.runtime.status(),
-    ideUrl: context.runtime.status().browserUrl,
+    openVscode: publicRuntimeStatus(context.runtime.status()),
     gatewayOrigin: context.gatewayOrigin,
-    uiToken: context.core.bridgeToken,
-    assetsUrl: `${context.gatewayOrigin}/assets`,
+    ...(publicStreamStatus ? { stream: publicStreamStatus } : {}),
+  };
+}
+
+function appResultMeta(context: McpServerContext): Record<string, unknown> | undefined {
+  const meta: Record<string, unknown> = {};
+  const ideUrl = context.runtime.status().browserUrl;
+  if (ideUrl) {
+    const value: WorkbenchIdeResultMeta = { ideUrl };
+    meta[WORKBENCH_IDE_META_KEY] = value;
+  }
+  const websocketUrl = context.stream?.status(context.gatewayOrigin).websocketUrl;
+  if (websocketUrl) {
+    const value: WorkbenchStreamResultMeta = { websocketUrl };
+    meta[WORKBENCH_STREAM_META_KEY] = value;
+  }
+  return Object.keys(meta).length > 0 ? meta : undefined;
+}
+
+function publicRuntimeStatus(status: ReturnType<OpenVscodeRuntime["status"]>): Record<string, unknown> {
+  return {
+    state: status.state,
+    ...(status.error ? { error: status.error } : {}),
   };
 }
 

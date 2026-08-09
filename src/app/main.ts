@@ -1,22 +1,18 @@
-// MCP App renderer entry point. The preferred gateway and iframe surfaces are
-// retained for local/self-hosted deployments, with a host-neutral portable
-// tier (bundled Monaco/xterm over standard MCP Apps tool calls) whenever the
-// gateway is private or framing is unavailable.
-//
-// "Never a blank frame": the loading cover is only ever hidden by a
-// *positive* signal from a committed tier. A 20s global watchdog forces a
-// portable/browser decision if the probe is still undecided, so no code path
-// that can leave the user staring at a permanently blank/loading screen.
-import { App, type McpUiHostContext } from "@modelcontextprotocol/ext-apps";
-import { probeEmbedded, probeNative, uiSocketUrl, type SessionPayload, type Tier, type TierProbeResult } from "./tier.js";
-import { AppToolTransport } from "./app-tool-transport.js";
-import { UiTransport, type TransportStatus, type UiClientTransport } from "./transport.js";
-import { Explorer } from "./explorer.js";
-import { NativeEditor, type ActiveEditorContext } from "./editor.js";
-import { NativeTerminal } from "./terminal.js";
+// MCP App entry point. This view renders the genuine OpenVSCode workbench or
+// an explicit explanation that the host/network cannot embed it. It never
+// substitutes a hand-built editor while continuing to call itself VS Code.
+import { App } from "@modelcontextprotocol/ext-apps";
+import {
+  framePolicyForUrl,
+  sessionWithAppMeta,
+  selectTier,
+  type FramePolicy,
+  type SessionPayload,
+  type Tier,
+  type TierProbeResult,
+} from "./tier.js";
 import { StatusBar } from "./statusbar.js";
-import { createDebouncer } from "./debounce.js";
-import type { HostTokenMap, ThemeMode } from "./theme.js";
+import { StreamedWorkbench } from "./streamed-workbench.js";
 
 declare global {
   interface Window {
@@ -25,8 +21,6 @@ declare global {
 }
 
 const PROBE_WATCHDOG_MS = 20_000;
-const MODEL_CONTEXT_DEBOUNCE_MS = 500;
-const SELECTED_TEXT_CAP = 2_000;
 
 const root = document.querySelector<HTMLDivElement>("#app")!;
 root.innerHTML = `
@@ -36,46 +30,33 @@ root.innerHTML = `
       <span class="title">MCP VS Code</span>
       <span class="subtitle" id="workspace">Connecting to workspace…</span>
       <span class="spacer"></span>
-      <button id="open-in-browser" type="button" title="Open in your browser" disabled>Open in browser</button>
+      <button id="open-in-browser" type="button" title="Open the genuine workbench in your browser" disabled>Open in browser</button>
       <button id="reload" type="button" title="Reload">Reload</button>
       <button id="fullscreen" type="button" title="Request fullscreen mode">Fullscreen</button>
     </header>
     <section class="content">
-      <div class="native-shell" id="native-shell" hidden>
-        <aside class="explorer" id="explorer"></aside>
-        <div class="editor-area">
-          <div class="tabs" id="tabs"></div>
-          <div class="conflict-banner" id="conflict-banner" hidden></div>
-          <div class="editor-container" id="editor-container"></div>
-          <div class="terminal-panel" id="terminal-panel">
-            <div class="terminal-panel-header">
-              <span>Terminal</span>
-              <button id="terminal-new" type="button" title="New terminal">New</button>
-            </div>
-            <div class="terminal-container" id="terminal-container"></div>
-          </div>
-        </div>
-      </div>
       <iframe id="workbench" class="workbench-frame" hidden title="VS Code workbench" allow="clipboard-read; clipboard-write" referrerpolicy="no-referrer"></iframe>
+      <div id="streamed-workbench" class="streamed-workbench-host" hidden></div>
       <div class="cover" id="cover">
         <div class="card">
           ${logo("large-mark")}
           <h1 id="cover-title">Preparing VS Code</h1>
           <p class="message" id="message">Starting the bundled Code OSS workbench and bridge…</p>
           <div class="details" id="details"></div>
-          <a class="open-browser" id="open-browser" href="#" target="_blank" rel="noopener noreferrer" hidden>Open in your browser</a>
+          <a class="open-browser" id="open-browser" href="#" target="_blank" rel="noopener noreferrer" hidden>Open the real workbench</a>
         </div>
       </div>
     </section>
     <footer class="statusbar" id="statusbar">
       <span class="status-item"><span class="dot"></span><span id="runtime-status">Starting</span></span>
       <span class="status-item tier-badge" id="tier-badge">Detecting…</span>
-      <span class="status-item">MCP bridge: <span id="bridge-status">waiting</span></span>
+      <span class="status-item">VS Code bridge: <span id="bridge-status">waiting</span></span>
       <span class="status-item right" id="origin"></span>
     </footer>
   </main>`;
 
 const frame = document.querySelector<HTMLIFrameElement>("#workbench")!;
+const streamRoot = document.querySelector<HTMLDivElement>("#streamed-workbench")!;
 const cover = document.querySelector<HTMLDivElement>("#cover")!;
 const coverTitle = document.querySelector<HTMLHeadingElement>("#cover-title")!;
 const message = document.querySelector<HTMLParagraphElement>("#message")!;
@@ -87,67 +68,17 @@ const runtimeStatus = document.querySelector<HTMLSpanElement>("#runtime-status")
 const bridgeStatus = document.querySelector<HTMLSpanElement>("#bridge-status")!;
 const origin = document.querySelector<HTMLSpanElement>("#origin")!;
 const statusbar = document.querySelector<HTMLElement>("#statusbar")!;
-const tierBadgeEl = document.querySelector<HTMLElement>("#tier-badge")!;
-const nativeShell = document.querySelector<HTMLDivElement>("#native-shell")!;
-const explorerRoot = document.querySelector<HTMLElement>("#explorer")!;
-const tabsBar = document.querySelector<HTMLElement>("#tabs")!;
-const editorContainer = document.querySelector<HTMLElement>("#editor-container")!;
-const terminalContainer = document.querySelector<HTMLElement>("#terminal-container")!;
-const conflictBanner = document.querySelector<HTMLDivElement>("#conflict-banner")!;
-
-const statusBar = new StatusBar(statusbar, tierBadgeEl, bridgeStatus);
+const tierBadge = document.querySelector<HTMLElement>("#tier-badge")!;
+const statusBar = new StatusBar(statusbar, tierBadge, bridgeStatus);
 
 let app: App | undefined;
 let currentSession: SessionPayload | undefined;
 let tierState: Tier = "probing";
 let probeToken = 0;
 let watchdogTimer: number | undefined;
-
-let transport: UiClientTransport | undefined;
-let explorer: Explorer | undefined;
-let editor: NativeEditor | undefined;
-let terminal: NativeTerminal | undefined;
 let lastCommittedOrigin: string | undefined;
-let lastHostContext: McpUiHostContext | undefined;
-
-// Debounced (500ms trailing) `app.updateModelContext()` push (epic #10
-// §7-A / Phase 3 §4.1). Deep-equal-deduped via `lastModelContextKey` so an
-// unchanged context (e.g. repeated cursor blinks in the same spot) never
-// re-sends. Cancelled in `tearDownCurrentTier()` -- every new surface this
-// wave adds registers its teardown there (§6.6).
-let lastModelContextKey: string | undefined;
-const pushModelContext = createDebouncer(MODEL_CONTEXT_DEBOUNCE_MS, (context: ActiveEditorContext) => {
-  if (!app || (tierState !== "native" && tierState !== "portable")) return;
-  const key = JSON.stringify(context);
-  if (key === lastModelContextKey) return;
-  lastModelContextKey = key;
-  const selectedText = context.selectedText.slice(0, SELECTED_TEXT_CAP);
-  const location = context.selection ? `:${context.selection.startLine}:${context.selection.startColumn}` : "";
-  const selectionNote = selectedText ? ` with ${selectedText.split("\n").length} line(s) selected` : "";
-  void app
-    .updateModelContext({
-      content: [
-        {
-          type: "text",
-          text: context.path
-            ? `The user is viewing ${context.path}${location}${selectionNote}.`
-            : "The user has no file open in the editor.",
-        },
-      ],
-      structuredContent: {
-        activeFile: context.path,
-        selection: context.selection,
-        selectedText,
-        dirty: context.dirty,
-        openFiles: context.openFiles,
-      },
-    })
-    .catch((error) => {
-      // A host that does not implement `ui/update-model-context` must not
-      // break the editor -- swallow and log only.
-      logTier(`app.updateModelContext failed (non-fatal): ${describeError(error)}`, "warning");
-    });
-});
+let lastRuntimeState: string | undefined;
+let streamedWorkbench: StreamedWorkbench | undefined;
 
 document.querySelector<HTMLButtonElement>("#reload")!.onclick = () => void reloadCurrentTier();
 document.querySelector<HTMLButtonElement>("#fullscreen")!.onclick = async () => {
@@ -158,7 +89,6 @@ document.querySelector<HTMLButtonElement>("#fullscreen")!.onclick = async () => 
     showTransientError(error);
   }
 };
-document.querySelector<HTMLButtonElement>("#terminal-new")!.onclick = () => void terminal?.createSession();
 openInBrowserButton.onclick = () => void openInBrowser();
 openBrowserLink.onclick = (event) => {
   event.preventDefault();
@@ -174,23 +104,25 @@ if (window.__MCP_VSCODE_DEBUG__) {
 
 async function connectMcpApp(): Promise<void> {
   app = new App(
-    { name: "MCP VS Code", version: "0.1.0" },
+    { name: "MCP VS Code", version: "0.2.2" },
     { availableDisplayModes: ["inline", "fullscreen", "pip"] },
   );
   app.ontoolresult = (result) => {
-    const payload = result.structuredContent as SessionPayload | undefined;
+    const payload = sessionWithAppMeta(
+      result.structuredContent as SessionPayload | undefined,
+      result._meta,
+    );
     if (payload?.openVscode || payload?.ideUrl) applySession(payload);
   };
   app.onhostcontextchanged = (context) => {
     document.documentElement.dataset.theme = context.theme ?? "dark";
-    applyHostTheme(context);
   };
   try {
     await app.connect();
     await refresh();
     window.setInterval(() => void refresh(), 2_000);
   } catch (error) {
-    showError("This host did not initialize the MCP App.", error instanceof Error ? error.message : String(error));
+    showError("This host did not initialize the MCP App.", describeError(error));
   }
 }
 
@@ -198,7 +130,7 @@ async function refresh(): Promise<void> {
   if (!app) return;
   try {
     const result = await app.callServerTool({ name: "workspace_status", arguments: {} });
-    applySession(result.structuredContent as SessionPayload);
+    applySession(sessionWithAppMeta(result.structuredContent as SessionPayload, result._meta)!);
   } catch (error) {
     showTransientError(error);
   }
@@ -219,107 +151,98 @@ async function refreshDebug(): Promise<void> {
 function applySession(session: SessionPayload): void {
   currentSession = session;
   const state = session.openVscode?.state ?? "unknown";
+  const previousState = lastRuntimeState;
+  lastRuntimeState = state;
   workspaceLabel.textContent = session.workspaceRoot ?? "Workspace";
   runtimeStatus.textContent = state;
   origin.textContent = session.gatewayOrigin ?? "";
-  const runtimeFailed = state === "failed" || state === "unavailable";
-  // The portable Monaco surface uses workspace/terminal MCP tools directly;
-  // an unavailable OpenVSCode child must not take that independent renderer
-  // down with it.
-  statusBar.setError(runtimeFailed && !app);
-  // The "Open in browser" affordance (epic #10 §7-A) must be visible and
-  // usable in gateway/browser tiers, not just the fallback card -- as soon as
-  // any workbench URL is known, offer it via `app.openLink()`.
-  openInBrowserButton.disabled = !(session.ideUrl ?? session.openVscode?.browserUrl);
+  statusBar.setConnection(session.bridge?.connected ? "open" : "waiting");
+  statusBar.setError(state === "failed" || state === "unavailable");
+  openInBrowserButton.disabled = !workbenchUrl(session);
 
-  if (runtimeFailed && !app) {
-    // The runtime itself never came up: there is nothing to probe yet, so
-    // surface the runtime error directly rather than running a tier probe
-    // that would only fail for an unrelated reason.
-    showError("The bundled OpenVSCode runtime is unavailable.", session.openVscode?.error ?? "Unknown runtime error");
+  if (state === "failed" || state === "unavailable") {
+    showError("The genuine OpenVSCode runtime is unavailable.", session.openVscode?.error ?? "Unknown runtime error");
+    return;
+  }
+
+  if (state === "starting") {
+    tierState = "probing";
+    statusBar.setTier("probing", "waiting for the genuine OpenVSCode runtime to start");
+    cover.hidden = false;
+    coverTitle.textContent = "Starting VS Code";
+    message.textContent = "Waiting for the bundled Code OSS workbench…";
+    details.textContent = "";
     return;
   }
 
   const originChanged = lastCommittedOrigin !== undefined && lastCommittedOrigin !== session.gatewayOrigin;
+  const becameReady = previousState === "starting" && state === "ready";
   if (tierState === "probing" && probeToken === 0) {
     void runProbe(session);
-    return;
-  }
-  if (originChanged) {
-    // Gateway restarted on a different ephemeral port: nothing we mounted is
-    // valid any more (assets URL, /ui socket, iframe origin all changed).
-    void reprobeFromScratch(session, "the gateway origin changed (likely a restart on a new ephemeral port)");
+  } else if (originChanged || becameReady) {
+    void reprobeFromScratch(
+      session,
+      originChanged ? "the gateway origin changed" : "the OpenVSCode runtime became ready",
+    );
   }
 }
 
-/**
- * Re-implements `selectTier()`'s exact decision logic (`src/app/tier.ts`)
- * using its already-exported per-leg probes (`probeNative`/`probeEmbedded`)
- * instead of the composite function, purely so each leg's outcome can be
- * logged via `app.sendLog` (epic #10 §7-A acceptance criterion 7). Does
- * NOT modify `tier.ts` (out of this wave's scope) -- `selectTier()` itself
- * is left untouched and still exported/tested independently.
- */
-async function runTierProbeWithLogging(session: SessionPayload, frame: HTMLIFrameElement): Promise<TierProbeResult> {
-  logTier("tier probe starting: checking the private /ui socket");
-  const nativeOk = await probeNative(session);
-  logTier(`native leg result: ${nativeOk ? "reachable" : "not reachable"}`);
-  if (nativeOk) {
-    return { tier: "native", reason: "the private /ui socket is reachable" };
-  }
+function hostFramePolicy(session: SessionPayload): FramePolicy {
+  const url = workbenchUrl(session);
+  if (!url || !app) return "unknown";
+  const sandboxCsp = app.getHostCapabilities()?.sandbox?.csp;
+  return framePolicyForUrl(url, sandboxCsp?.frameDomains, sandboxCsp !== undefined);
+}
 
-  // Once the standard MCP Apps connection is initialized, the portable
-  // renderer is both more reliable and more portable than guessing that an
-  // advertised `/ide` URL has a matching reverse proxy. Do not navigate the
-  // hidden iframe (or offer that URL) merely because the server printed one.
-  if (app) {
-    return {
-      tier: "portable",
-      reason: "the private gateway is not reachable; using bundled Monaco over the standard MCP Apps tool channel",
-    };
+async function runTierProbeWithLogging(session: SessionPayload): Promise<TierProbeResult> {
+  if (session.stream?.enabled) {
+    const result = await selectTier(session, frame);
+    logTier(`experimental stream selection: ${result.tier} — ${result.reason}`);
+    return result;
   }
-
-  const ideUrl = session.ideUrl ?? session.openVscode?.browserUrl;
-  if (ideUrl) {
-    logTier(`embedded leg starting: probing the workbench iframe liveness handshake at ${ideUrl}`);
-    const embeddedOk = await probeEmbedded(frame, ideUrl);
-    logTier(`embedded leg result: ${embeddedOk ? "liveness handshake received" : "no liveness signal (likely blocked framing)"}`);
-    if (embeddedOk) {
-      return { tier: "embedded", reason: "the embedded workbench frame confirmed it loaded" };
-    }
+  const url = workbenchUrl(session);
+  if (!url) {
+    logTier("real workbench probe skipped: no workbench URL is available yet");
+    return { tier: "browser", reason: "no workbench URL is available yet" };
+  }
+  const framePolicy = hostFramePolicy(session);
+  logTier(`host frameDomains decision for ${new URL(url).origin}: ${framePolicy}`);
+  if (framePolicy === "denied") {
     return {
       tier: "browser",
-      reason: "the embedded workbench frame did not report loading (likely blocked by the host's frame policy)",
+      reason: "the MCP host did not approve the real workbench origin in frameDomains",
     };
   }
-  logTier("embedded leg skipped: no workbench URL is available yet");
-  return { tier: "browser", reason: "no workbench URL is available yet" };
+  logTier(`real workbench iframe probe starting at ${url}`);
+  const result = await selectTier(session, frame, { framePolicy });
+  logTier(`real workbench iframe probe result: ${result.tier} — ${result.reason}`);
+  return result;
 }
 
 async function runProbe(session: SessionPayload): Promise<void> {
   const token = ++probeToken;
   tierState = "probing";
   statusBar.setTier("probing");
-  message.textContent = "Detecting the best way to embed VS Code in this host…";
+  cover.hidden = false;
+  coverTitle.textContent = "Preparing VS Code";
+  message.textContent = "Checking whether this host permits the genuine OpenVSCode workbench…";
   details.textContent = "";
   openBrowserLink.hidden = true;
-  coverTitle.textContent = "Preparing VS Code";
-  cover.hidden = false;
 
   if (watchdogTimer !== undefined) window.clearTimeout(watchdogTimer);
   watchdogTimer = window.setTimeout(() => {
     if (token !== probeToken || tierState !== "probing") return;
-    const reason = "tier probe watchdog (20s) fired before a tier could be committed";
+    const reason = "the real-workbench probe timed out";
     logTier(reason, "warning");
-    commitTier({ tier: app ? "portable" : "browser", reason }, session);
+    commitTier({ tier: "browser", reason }, session);
   }, PROBE_WATCHDOG_MS);
 
-  const result = await runTierProbeWithLogging(session, frame).catch((error): TierProbeResult => {
-    const reason = `tier probe threw: ${describeError(error)}`;
+  const result = await runTierProbeWithLogging(session).catch((error): TierProbeResult => {
+    const reason = `the real-workbench probe failed: ${describeError(error)}`;
     logTier(reason, "error");
-    return { tier: app ? "portable" : "browser", reason };
+    return { tier: "browser", reason };
   });
-  if (token !== probeToken) return; // superseded by a newer probe
+  if (token !== probeToken) return;
   commitTier(result, session);
 }
 
@@ -328,236 +251,106 @@ function commitTier(result: TierProbeResult, session: SessionPayload): void {
   watchdogTimer = undefined;
   tierState = result.tier;
   lastCommittedOrigin = session.gatewayOrigin;
-  logTier(`committing tier "${result.tier}" — ${result.reason}`);
+  logTier(`committing renderer "${result.tier}" — ${result.reason}`);
   statusBar.setTier(result.tier, result.reason);
-  openInBrowserButton.hidden = result.tier === "portable";
-  tearDownCurrentTier(result.tier);
+  streamedWorkbench?.dispose();
+  streamedWorkbench = undefined;
+  streamRoot.hidden = true;
 
-  if (result.tier === "native") {
-    void mountNative(session);
-  } else if (result.tier === "embedded") {
-    nativeShell.hidden = true;
-    frame.hidden = false;
-    cover.hidden = true; // probeEmbedded already committed the frame src.
-  } else if (result.tier === "portable") {
-    void mountPortable(session);
-  } else {
-    nativeShell.hidden = true;
+  if (result.tier === "stream") {
     frame.hidden = true;
-    showBrowserCard(session, result.reason);
-  }
-}
-
-function tearDownCurrentTier(nextTier: Tier): void {
-  // A re-probe may switch between the gateway-backed and portable Monaco
-  // transports while keeping the same visual shell. Always dispose the old
-  // client first so listeners, terminal polling, and models cannot leak.
-  transport?.close();
-  transport = undefined;
-  editor?.dispose();
-  editor = undefined;
-  terminal?.dispose();
-  terminal = undefined;
-  explorer = undefined;
-  pushModelContext.cancel();
-  lastModelContextKey = undefined;
-  if (nextTier !== "embedded") {
     frame.src = "about:blank";
-  }
-}
-
-async function mountNative(session: SessionPayload): Promise<void> {
-  if (!session.gatewayOrigin || !session.uiToken) {
-    commitTier({
-      tier: app ? "portable" : "browser",
-      reason: "gateway-backed renderer selected but the session payload is incomplete",
-    }, session);
+    void mountStream(session);
     return;
   }
-  const gatewayTransport = new UiTransport(uiSocketUrl(session.gatewayOrigin, session.uiToken));
-  transport = gatewayTransport;
-  gatewayTransport.onStatusChange = (status: TransportStatus) => statusBar.setConnection(status);
-  gatewayTransport.onGiveUp = () => {
-    // Three consecutive reconnect failures: assume the gateway restarted
-    // (new ephemeral port) or the socket is durably blocked, and re-run the
-    // full probe rather than spinning forever in a broken native tier.
-    if (currentSession) {
-      void reprobeFromScratch(
-        currentSession,
-        "the /ui transport gave up reconnecting after repeated consecutive failures",
-      );
-    }
-  };
-  gatewayTransport.connect();
-
-  try {
-    await waitForTransportOpen(gatewayTransport);
-    await mountEditorShell(session, gatewayTransport, session.assetsUrl ?? "");
-  } catch (error) {
-    if (app) {
-      commitTier({ tier: "portable", reason: `gateway-backed Monaco failed to mount: ${describeError(error)}` }, session);
-    } else {
-      showError("The editor failed to load.", describeError(error));
-    }
-  }
-}
-
-function waitForTransportOpen(clientTransport: UiClientTransport, timeoutMs = 5_000): Promise<void> {
-  if (clientTransport.isOpen) return Promise.resolve();
-  return new Promise((resolve, reject) => {
-    let unsubscribe = (): void => undefined;
-    const timer = window.setTimeout(() => {
-      unsubscribe();
-      reject(new Error("The editor transport did not open in time"));
-    }, timeoutMs);
-    unsubscribe = clientTransport.onOpen(() => {
-      window.clearTimeout(timer);
-      unsubscribe();
-      resolve();
-    });
-  });
-}
-
-async function mountPortable(session: SessionPayload): Promise<void> {
-  if (!app) {
-    commitTier({ tier: "browser", reason: "the host-neutral renderer requires an MCP Apps connection" }, session);
+  if (result.tier === "embedded") {
+    frame.hidden = false;
+    cover.hidden = true;
     return;
   }
-  const appTransport = new AppToolTransport(app);
-  transport = appTransport;
-  appTransport.onStatusChange = (status: TransportStatus) => statusBar.setConnection(status);
-  appTransport.connect();
-
-  try {
-    await mountEditorShell(session, appTransport, "");
-  } catch (error) {
-    showError("The portable editor failed to load.", describeError(error));
-  }
-}
-
-async function mountEditorShell(
-  session: SessionPayload,
-  clientTransport: UiClientTransport,
-  assetsUrl: string,
-): Promise<void> {
-  nativeShell.hidden = false;
   frame.hidden = true;
-  cover.hidden = true;
-
-  explorer = new Explorer(explorerRoot, clientTransport, {
-    onOpenFile: (path) => void editor?.openFile(path),
-  });
-  editor = new NativeEditor(editorContainer, tabsBar, clientTransport, assetsUrl, {
-    onDirtyChanged: () => {
-      /* tab dot rendering is handled inside NativeEditor itself */
-    },
-    onConflict: (path, expected, actual) => showConflictBanner(path, expected, actual),
-    onError: (msg) => showTransientError(new Error(msg)),
-    onActiveContextChanged: (context) => pushModelContext(context),
-  });
-  terminal = new NativeTerminal(terminalContainer, clientTransport, assetsUrl, session.workspaceRoot ?? ".");
-
-  // Register the server->client `/ui` RPC handlers for the five
-  // `editor_*`/`diagnostics_get` MCP tools (epic #10 §7-A item 6 / Phase 3
-  // §2.4): this is the client half of the bidirectional channel landed in
-  // `src/http/ui-socket.ts`. Closures over `editor` are safe even though
-  // it is reassigned just below -- no message can arrive before this
-  // synchronous function returns control to the event loop.
-  clientTransport.handle("editor.open", (params) => requireEditor().open(params));
-  clientTransport.handle("editor.state", () => requireEditor().getState());
-  clientTransport.handle("editor.setSelection", (params) => requireEditor().setSelection(params));
-  clientTransport.handle("editor.applyEdits", (params) => requireEditor().applyEdits(params));
-  clientTransport.handle("diagnostics.get", (params) => requireEditor().getDiagnostics(params));
-
-  await editor.mount();
-  await terminal.mount();
-  await explorer.refresh();
-  if (lastHostContext) applyHostTheme(lastHostContext);
+  frame.src = "about:blank";
+  showBrowserCard(session, result.reason);
 }
 
-/** Narrow accessor used by the `/ui` handlers registered in `mountNative`
- * above; throws (surfaced to the MCP caller as `INTERNAL_ERROR`, not
- * silently swallowed) if a stale handler somehow fires after teardown. */
-function requireEditor(): NativeEditor {
-  if (!editor) throw new Error("The native editor is not mounted");
-  return editor;
-}
-
-/** Maps the host's CSS custom-property tokens onto Monaco/xterm (plan
- * §4.2) and mirrors them onto the document root so the app's own chrome
- * (tabs, explorer, statusbar) matches too. Safe to call before the native
- * tier mounts -- `NativeEditor`/`NativeTerminal` no-op until `mount()`
- * resolves, and `main.ts` calls this again once native mounting finishes. */
-function applyHostTheme(context: McpUiHostContext): void {
-  lastHostContext = context;
-  const mode: ThemeMode = context.theme === "light" ? "light" : "dark";
-  const tokens = (context.styles ?? {}) as HostTokenMap;
-  for (const [key, value] of Object.entries(tokens)) {
-    if (typeof value === "string" && key.startsWith("--")) {
-      document.documentElement.style.setProperty(key, value);
-    }
+async function mountStream(session: SessionPayload): Promise<void> {
+  const websocketUrl = session.stream?.websocketUrl;
+  if (!websocketUrl) {
+    const reason = "experimental streaming was selected without an app-only stream endpoint";
+    tierState = "browser";
+    statusBar.setTier("browser", reason);
+    showBrowserCard(session, reason);
+    return;
   }
-  editor?.applyTheme(tokens, mode);
-  terminal?.applyTheme(tokens, mode);
+  streamRoot.hidden = false;
+  cover.hidden = false;
+  coverTitle.textContent = "Starting streamed VS Code";
+  message.textContent = "Launching a server-side browser for the genuine OpenVSCode workbench…";
+  details.textContent = "Experimental mode: compressed pixels and user input are relayed over the MCP gateway.";
+  let mounted = false;
+  const viewer = new StreamedWorkbench(streamRoot, websocketUrl, {
+    onStatus: (state, detail) => {
+      if (viewer !== streamedWorkbench) return;
+      if (state === "starting") message.textContent = detail ?? "Waiting for the genuine workbench…";
+      else if (mounted && (state === "error" || state === "closed")) {
+        failMountedStream(viewer, session, detail ?? `stream connection ${state}`);
+        return;
+      }
+      statusBar.setConnection(state === "ready" ? "open" : state === "closed" || state === "error" ? "closed" : "connecting");
+    },
+  });
+  streamedWorkbench = viewer;
+  try {
+    await viewer.mount();
+    if (viewer !== streamedWorkbench || tierState !== "stream") return;
+    mounted = true;
+    cover.hidden = true;
+  } catch (error) {
+    if (viewer !== streamedWorkbench) return;
+    viewer.dispose();
+    streamedWorkbench = undefined;
+    streamRoot.hidden = true;
+    const reason = `experimental workbench streaming failed: ${describeError(error)}`;
+    tierState = "browser";
+    statusBar.setTier("browser", reason);
+    showBrowserCard(session, reason);
+  }
 }
 
-function showConflictBanner(path: string, expected: string, actual: string): void {
-  conflictBanner.hidden = false;
-  conflictBanner.innerHTML = "";
-  const text = document.createElement("span");
-  text.textContent = `"${path}" changed on disk since it was opened.`;
-  const reload = document.createElement("button");
-  reload.type = "button";
-  reload.textContent = "Reload from disk (discard my changes)";
-  reload.onclick = () => {
-    void editor?.reloadFromDisk(path);
-    conflictBanner.hidden = true;
-  };
-  const overwrite = document.createElement("button");
-  overwrite.type = "button";
-  overwrite.textContent = "Overwrite disk";
-  overwrite.onclick = () => {
-    void editor?.overwriteWithLocal(path, actual);
-    conflictBanner.hidden = true;
-  };
-  const cancel = document.createElement("button");
-  cancel.type = "button";
-  cancel.textContent = "Cancel";
-  cancel.onclick = () => {
-    conflictBanner.hidden = true;
-  };
-  void expected;
-  conflictBanner.append(text, reload, overwrite, cancel);
+function failMountedStream(viewer: StreamedWorkbench, session: SessionPayload, detail: string): void {
+  if (viewer !== streamedWorkbench || tierState !== "stream") return;
+  viewer.dispose();
+  streamedWorkbench = undefined;
+  streamRoot.hidden = true;
+  const reason = `experimental workbench streaming stopped: ${detail}`;
+  tierState = "browser";
+  statusBar.setConnection("closed");
+  statusBar.setTier("browser", reason);
+  showBrowserCard(session, reason);
 }
 
 function showBrowserCard(session: SessionPayload, reason: string): void {
   cover.hidden = false;
-  coverTitle.textContent = "Open VS Code in your browser";
-  const url = session.ideUrl ?? session.openVscode?.browserUrl;
+  coverTitle.textContent = "Real VS Code cannot be embedded here";
+  const url = workbenchUrl(session);
   if (url) {
-    message.textContent = "This host cannot embed the workbench directly, but it can still be reached in a regular browser tab.";
+    message.textContent = "This host or deployment blocked the genuine workbench. No substitute editor has been loaded.";
     openBrowserLink.href = url;
     openBrowserLink.hidden = false;
+    details.textContent = `${reason}\n${url}`;
   } else {
-    message.textContent = "The workbench is not reachable yet.";
+    message.textContent = "The genuine workbench does not have a browser-reachable URL.";
     openBrowserLink.hidden = true;
+    details.textContent = reason;
   }
-  details.textContent = reason;
 }
 
-/** Shared "Open in your browser" action for both the titlebar button and the browser card's
- * link. Prefers `app.openLink()` -- the host-sanctioned navigation bridge
- * -- and only falls back to a raw `window.open()` in the debug harness
- * (which has no `App` instance at all). */
 async function openInBrowser(): Promise<void> {
-  const url = currentSession?.ideUrl ?? currentSession?.openVscode?.browserUrl;
+  const url = currentSession && workbenchUrl(currentSession);
   if (!url) return;
   try {
-    if (app) {
-      await app.openLink({ url });
-    } else {
-      window.open(url, "_blank", "noopener,noreferrer");
-    }
+    if (app) await app.openLink({ url });
+    else window.open(url, "_blank", "noopener,noreferrer");
   } catch (error) {
     showTransientError(error);
   }
@@ -569,19 +362,23 @@ async function reloadCurrentTier(): Promise<void> {
     frame.src = frame.src;
     return;
   }
-  await reprobeFromScratch(currentSession, "user requested a reload");
+  await reprobeFromScratch(currentSession, "the user requested a reload");
 }
 
 async function reprobeFromScratch(session: SessionPayload, cause: string): Promise<void> {
-  logTier(`re-probing from scratch: ${cause}`);
+  logTier(`re-probing the genuine workbench: ${cause}`);
   tierState = "probing";
-  probeToken += 1; // invalidate any in-flight probe from the previous origin
+  probeToken += 1;
   await runProbe(session);
 }
 
 function showError(summary: string, detail: string): void {
   cover.hidden = false;
-  coverTitle.textContent = "Preparing VS Code";
+  frame.hidden = true;
+  streamRoot.hidden = true;
+  streamedWorkbench?.dispose();
+  streamedWorkbench = undefined;
+  coverTitle.textContent = "VS Code unavailable";
   message.textContent = summary;
   details.textContent = detail;
   openBrowserLink.hidden = true;
@@ -590,26 +387,21 @@ function showError(summary: string, detail: string): void {
 
 function showTransientError(error: unknown): void {
   const previous = runtimeStatus.textContent;
-  runtimeStatus.textContent = error instanceof Error ? error.message : String(error);
+  runtimeStatus.textContent = describeError(error);
   window.setTimeout(() => {
     runtimeStatus.textContent = currentSession?.openVscode?.state ?? previous;
   }, 3_000);
 }
 
-/** `app.sendLog` on every tier transition (epic #10 §7-A acceptance
- * criterion 7): probe start, each leg's outcome plus its reason string,
- * the commit, and any re-probe cause. Also logs to the console so the
- * same information is visible without a host that surfaces MCP logs.
- * Never throws -- a host without logging support must not break the
- * editor. */
+function workbenchUrl(session: SessionPayload): string | undefined {
+  return session.ideUrl ?? session.openVscode?.browserUrl;
+}
+
 function logTier(text: string, level: "info" | "warning" | "error" = "info"): void {
-  if (level === "error") console.error(`[mcp-vscode/tier] ${text}`);
-  else if (level === "warning") console.warn(`[mcp-vscode/tier] ${text}`);
-  else console.debug(`[mcp-vscode/tier] ${text}`);
-  if (!app) return;
-  app.sendLog({ level, logger: "mcp-vscode/tier", data: text }).catch(() => {
-    // Best-effort: some hosts may not implement server-side logging.
-  });
+  if (level === "error") console.error(`[mcp-vscode/renderer] ${text}`);
+  else if (level === "warning") console.warn(`[mcp-vscode/renderer] ${text}`);
+  else console.debug(`[mcp-vscode/renderer] ${text}`);
+  app?.sendLog({ level, logger: "mcp-vscode/renderer", data: text }).catch(() => undefined);
 }
 
 function describeError(error: unknown): string {

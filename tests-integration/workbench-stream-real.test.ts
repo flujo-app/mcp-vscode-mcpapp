@@ -8,7 +8,17 @@ import { selectChromiumIdentity } from "../src/runtime/chromium-identity.js";
 import { launchSystemChromium } from "../src/runtime/workbench-stream.js";
 import type { StreamBrowserSession } from "../src/runtime/workbench-stream.js";
 
-test("an installed system Chromium emits a genuine CDP screencast frame", { timeout: 45_000 }, async (t) => {
+// Hosted Linux/macOS images carry mutable, unpinned browser installs. Keep one
+// genuine hosted-runner smoke test on Windows while deterministic launch and
+// isolation tests continue to cover every platform.
+const hostedBrowserSkip = process.env.GITHUB_ACTIONS === "true" && process.platform !== "win32"
+  ? "GitHub Actions system Chromium is smoke-tested on Windows only"
+  : false;
+
+test("an installed system Chromium emits a genuine CDP screencast frame", {
+  skip: hostedBrowserSkip,
+  timeout: 45_000,
+}, async (t) => {
   const executable = await discoverChromiumExecutable();
   if (!executable) {
     t.skip("no system Edge, Chrome, or Chromium installation");

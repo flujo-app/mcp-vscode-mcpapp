@@ -3,6 +3,12 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      recovery_tag:
+        description: Existing stable release tag whose audited npm assets should be published
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -13,7 +19,7 @@ concurrency:
 
 jobs:
   standalone:
-    if: ${{ !contains(github.ref_name, '-') }}
+    if: ${{ github.event_name == 'push' && !contains(github.ref_name, '-') }}
     strategy:
       matrix:
         include:
@@ -76,6 +82,7 @@ jobs:
   # The dispatcher carries no runtime, so it builds on Linux in seconds instead of
   # waiting on the ~1.5h native Windows OpenVSCode build.
   dispatcher:
+    if: ${{ github.event_name == 'push' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -122,7 +129,7 @@ jobs:
           path: mcp-vscode-${{ github.ref_name }}-dispatcher.*
 
   publish:
-    if: ${{ !contains(github.ref_name, '-') }}
+    if: ${{ github.event_name == 'push' && !contains(github.ref_name, '-') }}
     needs: [standalone, dispatcher]
     runs-on: ubuntu-latest
     permissions:
@@ -189,7 +196,7 @@ jobs:
   # pins them as optionalDependencies, so releasing it first would leave a window
   # where `npx` resolves a dispatcher whose runtime packages do not exist yet.
   publish-npm:
-    if: ${{ !contains(github.ref_name, '-') }}
+    if: ${{ github.event_name == 'push' && !contains(github.ref_name, '-') }}
     needs: [standalone, dispatcher, publish]
     runs-on: ubuntu-latest
     environment: npm-publish
@@ -214,11 +221,47 @@ jobs:
       - name: Verify and publish the audited npm artifacts
         run: npm run npm:publish -- artifacts --trusted-publishing
 
+  # Recover npm publishing from release assets that already passed the expensive
+  # platform builds. This runs the current, fixed publisher without rebuilding or
+  # replacing any immutable artifact.
+  recover-npm:
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    environment: npm-publish
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - name: Verify the recovery tag matches this publisher version
+        run: node scripts/verify-release-tag.mjs "${{ inputs.recovery_tag }}"
+      - name: Enable npm trusted publishing
+        run: npm install --global npm@latest
+      - run: npm ci --ignore-scripts
+      - name: Download the existing audited npm release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          mkdir artifacts
+          gh release download "${{ inputs.recovery_tag }}" \
+            --dir artifacts \
+            --pattern '*.npm.tgz' \
+            --pattern '*.npm.tgz.sha256'
+          (cd artifacts && sha256sum --check -- *.npm.tgz.sha256)
+      - name: Verify and publish the existing audited npm artifacts
+        run: npm run npm:publish -- artifacts --trusted-publishing
+
   # Prereleases reuse the already-published OpenVSCode runtime packages and
   # publish only the small dispatcher/app layer. This keeps browser fixes
   # testable in minutes instead of rebuilding an unchanged Windows runtime.
   publish-npm-prerelease:
-    if: ${{ contains(github.ref_name, '-') }}
+    if: ${{ github.event_name == 'push' && contains(github.ref_name, '-') }}
     needs: dispatcher
     runs-on: ubuntu-latest
     environment: npm-publish

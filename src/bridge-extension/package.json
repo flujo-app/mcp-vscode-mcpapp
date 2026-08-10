@@ -9,8 +9,12 @@
     "vscode": "^1.109.0"
   },
   "main": "./extension.cjs",
-  "extensionKind": ["workspace"],
-  "activationEvents": ["*"],
+  "extensionKind": [
+    "workspace"
+  ],
+  "activationEvents": [
+    "*"
+  ],
   "capabilities": {
     "virtualWorkspaces": true,
     "untrustedWorkspaces": {

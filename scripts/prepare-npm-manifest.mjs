@@ -7,6 +7,7 @@
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
+import semver from "semver";
 
 const PLATFORM_TARGETS = ["win32-x64", "linux-x64", "linux-arm64"];
 
@@ -14,7 +15,11 @@ const projectRoot = path.resolve(process.cwd());
 const packagePath = path.join(projectRoot, "package.json");
 const packageJson = JSON.parse(await readFile(packagePath, "utf8"));
 const serverJson = JSON.parse(await readFile(path.join(projectRoot, "server.json"), "utf8"));
-const runtimePackageVersion = packageJson.mcpVscodeRuntimeVersion ?? packageJson.version;
+const runtimePackageVersion =
+  process.env.MCP_VSCODE_RUNTIME_VERSION ?? packageJson.mcpVscodeRuntimeVersion ?? packageJson.version;
+if (!semver.valid(runtimePackageVersion)) {
+  throw new Error(`Invalid platform runtime version: ${JSON.stringify(runtimePackageVersion)}`);
+}
 
 if (packageJson.version !== serverJson.version) {
   throw new Error(

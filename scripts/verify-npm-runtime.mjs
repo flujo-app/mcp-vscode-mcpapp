@@ -6,13 +6,18 @@
 import { access, readFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
+import semver from "semver";
 
 const PLATFORM_TARGETS = ["win32-x64", "linux-x64", "linux-arm64"];
 
 const projectRoot = path.resolve(process.cwd());
 const packageJson = JSON.parse(await readFile(path.join(projectRoot, "package.json"), "utf8"));
 const serverJson = JSON.parse(await readFile(path.join(projectRoot, "server.json"), "utf8"));
-const runtimePackageVersion = packageJson.mcpVscodeRuntimeVersion ?? packageJson.version;
+const runtimePackageVersion =
+  process.env.MCP_VSCODE_RUNTIME_VERSION ?? packageJson.mcpVscodeRuntimeVersion ?? packageJson.version;
+if (!semver.valid(runtimePackageVersion)) {
+  throw new Error(`Invalid platform runtime version: ${JSON.stringify(runtimePackageVersion)}`);
+}
 
 if (packageJson.name !== "@mario.andreschak/mcp-vscode") {
   throw new Error(`Unexpected npm package name: ${JSON.stringify(packageJson.name)}`);

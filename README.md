@@ -121,6 +121,7 @@ FLUJO-managed hosted children may also receive `FLUJO_MCP_APP_RUNTIME_REGISTER_U
 
 Default mode honestly falls back to a browser when the tested Claude Desktop host declines the local loopback `frameDomains` request:
 
+<!-- x-release-please-start-version -->
 ```json
 {
   "mcpServers": {
@@ -152,6 +153,7 @@ To test genuine inline streaming instead:
   }
 }
 ```
+<!-- x-release-please-end -->
 
 The browser-path override is optional when discovery finds an installed browser. Host behavior changes over time; re-run the [manual matrix](docs/manual-test-matrix.md) against the exact Claude Desktop version rather than treating the current observation as permanent.
 
@@ -244,6 +246,7 @@ The archive contains its own Node.js and OpenVSCode runtimes. Default iframe/bro
 
 With Node.js 22 or newer, `npx` starts the bundled stdio server on Windows x64, Linux x64, and Linux ARM64:
 
+<!-- x-release-please-start-version -->
 ```powershell
 npx -y @mario.andreschak/mcp-vscode@0.2.2 --stdio --workspace "C:\path\to\repository"
 ```
@@ -251,6 +254,7 @@ npx -y @mario.andreschak/mcp-vscode@0.2.2 --stdio --workspace "C:\path\to\reposi
 ```bash
 npx -y @mario.andreschak/mcp-vscode@0.2.2 --stdio --workspace "/path/to/repository"
 ```
+<!-- x-release-please-end -->
 
 Pin the workspace explicitly. Without `--workspace` or `MCP_VSCODE_WORKSPACE`, the server uses its process working directory and reports that choice on stderr. Do not accidentally expose a home directory, volume root, or unrelated checkout.
 
@@ -308,11 +312,32 @@ npm run npm:platform-package -- linux-x64
 
 The runtime fetcher pins OpenVSCode `1.109.5` and verifies upstream Linux SHA-256 digests before extraction. Windows builds pin the configured upstream commit and invoke Code OSS's Windows remote-web build target. Runtime and standalone output directories are ignored by Git.
 
-## Publish a release to npm
+## Release automation
 
-Release CI publishes the platform runtime packages before the platform-neutral dispatcher. To verify or publish previously built release artifacts:
+Release Please maintains a release pull request from conventional commits (`fix:`, `feat:`, and breaking `type!:` changes). Merging that pull request creates the next `v*` tag and GitHub Release. The tag starts Release CI, which builds all platform artifacts and publishes the runtime packages before the platform-neutral dispatcher through npm trusted publishing. Normal releases require no local artifacts, npm token, `npm login`, or browser authentication.
 
+Release Please uses a repository-scoped GitHub App so the tag it creates can trigger Release CI. Configure the App once with **Contents**, **Issues**, and **Pull requests** read/write access, install it only on this repository, then add:
+
+- repository variable `RELEASE_APP_CLIENT_ID` — the App's Client ID;
+- repository secret `RELEASE_APP_PRIVATE_KEY` — the App's PEM private key.
+
+Without those values, the Release Please workflow exits successfully with a configuration notice and performs no release operation. The npm side remains secretless: each package trusts `.github/workflows/release.yml` in `flujo-app/mcp-vscode-mcpapp`, restricted to the `npm-publish` environment.
+
+Routine release flow:
+
+1. Merge ordinary changes into `main` with a conventional squash title.
+2. Review and merge the automatically maintained Release Please pull request.
+3. Follow the tag-triggered Release workflow; it creates and uploads the platform archives and publishes npm with signed provenance.
+
+### Manual npm recovery
+
+`npm run npm:publish` is only for verifying or resuming previously built GitHub Release artifacts. It does not build or download them:
+
+<!-- x-release-please-start-version -->
 ```bash
+gh release download v0.2.2 \
+  --dir release-artifacts-v0.2.2 \
+  --pattern '*.npm.tgz*'
 npm run npm:publish -- release-artifacts-v0.2.2 --dry-run
 npm run npm:publish -- release-artifacts-v0.2.2
 ```
@@ -325,8 +350,9 @@ npm run npm:login
 npm run npm:publish:wait -- release-artifacts-v0.2.2
 npm run npm:publish -- release-artifacts-v0.2.2 --no-login
 ```
+<!-- x-release-please-end -->
 
-The publish script verifies artifact hashes and internal package names/versions before authentication. It skips versions already present so interrupted runs are resumable; it does not rebuild the audited tarballs.
+The publish script verifies artifact hashes and internal package names/versions before authentication. It skips only registry versions whose tarball integrity matches exactly, so interrupted runs are resumable; it does not rebuild the audited tarballs. It also refuses to move a dist-tag such as `latest` or `beta` backward if an older failed release is retried after a newer one.
 
 ## Publish to the MCP Registry
 

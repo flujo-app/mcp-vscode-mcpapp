@@ -46,7 +46,7 @@ export interface McpServerContext {
 
 export function createMcpServer(context: McpServerContext): McpServer {
   const { core, runtime } = context;
-  const server = new McpServer({ name: "mcp-vscode", version: "0.2.2" });
+  const server = new McpServer({ name: "mcp-vscode", version: "0.2.2" }); // x-release-please-version
 
   /** Editor and diagnostics tools always target the genuine OpenVSCode bridge. */
   const callEditor = async (method: string, params?: unknown, timeoutMs?: number): Promise<Record<string, unknown>> => {

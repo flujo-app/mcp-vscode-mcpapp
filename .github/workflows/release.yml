@@ -7,6 +7,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: production-releases
+  queue: max
+
 jobs:
   standalone:
     if: ${{ !contains(github.ref_name, '-') }}
@@ -75,14 +79,38 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
       - run: npm ci
       - run: node scripts/verify-release-tag.mjs ${{ github.ref_name }}
+      - name: Select the platform runtime version
+        id: runtime-version
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+            runtime_version=$(
+              git tag --merged HEAD |
+                node -e 'const fs=require("node:fs"),semver=require("semver");const versions=fs.readFileSync(0,"utf8").split(/\s+/).filter(tag=>tag.startsWith("v")&&semver.valid(tag.slice(1))&&!semver.prerelease(tag.slice(1))).map(tag=>tag.slice(1)).sort(semver.rcompare);process.stdout.write(versions[0]??"")'
+            )
+            if [[ -z "$runtime_version" ]]; then
+              echo "::error::No stable release tag is reachable from prerelease $GITHUB_REF_NAME."
+              exit 1
+            fi
+          else
+            runtime_version=$(node -p "require('./package.json').version")
+          fi
+          echo "version=$runtime_version" >>"$GITHUB_OUTPUT"
+          echo "dispatcher will use platform runtime packages $runtime_version"
       - run: npm run npm:prepare-manifest
+        env:
+          MCP_VSCODE_RUNTIME_VERSION: ${{ steps.runtime-version.outputs.version }}
       - name: Pack dispatcher npm package
+        env:
+          MCP_VSCODE_RUNTIME_VERSION: ${{ steps.runtime-version.outputs.version }}
         run: |
           packed=$(npm pack --silent | tail -n 1)
           archive="mcp-vscode-${{ github.ref_name }}-dispatcher.npm.tgz"
@@ -105,46 +133,86 @@ jobs:
           pattern: mcp-vscode-*-release
           path: artifacts
           merge-multiple: true
-      - uses: softprops/action-gh-release@v3
-        with:
-          generate_release_notes: true
-          files: artifacts/*
+      - name: Upload assets without replacing Release Please notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(artifacts/*)
+          checksums=(artifacts/*.sha256)
+          ((${#files[@]} > 0)) || { echo "::error::No release artifacts were downloaded."; exit 1; }
+          ((${#checksums[@]} > 0)) || { echo "::error::No release checksums were downloaded."; exit 1; }
+          (cd artifacts && sha256sum --check -- *.sha256)
+
+          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes --title "$GITHUB_REF_NAME"
+          fi
+
+          release_json=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$GITHUB_REF_NAME")
+          upload=()
+          for file in "${files[@]}"; do
+            name=$(basename "$file")
+            match=$(jq --arg name "$name" '[.assets[] | select(.name == $name)]' <<<"$release_json")
+            count=$(jq 'length' <<<"$match")
+            if (( count == 0 )); then
+              upload+=("$file")
+              continue
+            fi
+            if (( count > 1 )); then
+              echo "::error::GitHub Release contains duplicate assets named $name."
+              exit 1
+            fi
+
+            local_digest="sha256:$(sha256sum "$file" | cut -d' ' -f1)"
+            remote_digest=$(jq -r '.[0].digest // empty' <<<"$match")
+            if [[ -z "$remote_digest" ]]; then
+              asset_id=$(jq -r '.[0].id' <<<"$match")
+              temporary_asset=$(mktemp)
+              gh api -H 'Accept: application/octet-stream' \
+                "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" >"$temporary_asset"
+              remote_digest="sha256:$(sha256sum "$temporary_asset" | cut -d' ' -f1)"
+              rm -f "$temporary_asset"
+            fi
+            if [[ "$remote_digest" != "$local_digest" ]]; then
+              echo "::error::Refusing to replace $name: the release has $remote_digest, but this run built $local_digest."
+              exit 1
+            fi
+            echo "unchanged release asset: $name"
+          done
+          if (( ${#upload[@]} > 0 )); then
+            gh release upload "$GITHUB_REF_NAME" "${upload[@]}"
+          fi
 
   # Publish the platform runtime packages BEFORE the dispatcher: the dispatcher
   # pins them as optionalDependencies, so releasing it first would leave a window
   # where `npx` resolves a dispatcher whose runtime packages do not exist yet.
   publish-npm:
     if: ${{ !contains(github.ref_name, '-') }}
-    needs: [standalone, dispatcher]
+    needs: [standalone, dispatcher, publish]
     runs-on: ubuntu-latest
     environment: npm-publish
     permissions:
       contents: read
       id-token: write
     steps:
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with:
-          node-version: 22
+          node-version: 24
           registry-url: https://registry.npmjs.org
+          package-manager-cache: false
       - name: Enable npm trusted publishing
         run: npm install --global npm@latest
+      - run: npm ci --ignore-scripts
       - uses: actions/download-artifact@v7
         with:
           pattern: mcp-vscode-*-release
           path: artifacts
           merge-multiple: true
-      - name: Verify artifact checksums
-        working-directory: artifacts
-        run: sha256sum --check *.npm.tgz.sha256
-      - name: Publish platform runtime packages
-        working-directory: artifacts
-        run: |
-          for target in linux-x64 linux-arm64 win32-x64; do
-            npm publish "mcp-vscode-${{ github.ref_name }}-${target}.npm.tgz" --access public --provenance
-          done
-      - name: Publish dispatcher package
-        working-directory: artifacts
-        run: npm publish "mcp-vscode-${{ github.ref_name }}-dispatcher.npm.tgz" --access public --provenance
+      - name: Verify and publish the audited npm artifacts
+        run: npm run npm:publish -- artifacts --trusted-publishing
 
   # Prereleases reuse the already-published OpenVSCode runtime packages and
   # publish only the small dispatcher/app layer. This keeps browser fixes
@@ -158,16 +226,18 @@ jobs:
       contents: read
       id-token: write
     steps:
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with:
-          node-version: 22
+          node-version: 24
           registry-url: https://registry.npmjs.org
+          package-manager-cache: false
       - name: Enable npm trusted publishing
         run: npm install --global npm@latest
+      - run: npm ci --ignore-scripts
       - uses: actions/download-artifact@v7
         with:
           name: mcp-vscode-dispatcher-release
           path: artifacts
-      - name: Publish prerelease dispatcher
-        working-directory: artifacts
-        run: npm publish "mcp-vscode-${{ github.ref_name }}-dispatcher.npm.tgz" --access public --tag beta --provenance
+      - name: Verify and publish the prerelease dispatcher
+        run: npm run npm:publish -- artifacts --trusted-publishing --dispatcher-only --tag beta

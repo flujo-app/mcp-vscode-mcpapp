@@ -22,14 +22,16 @@ test("Chromium discovery fails honestly for a missing explicit executable", asyn
 
 test("Chromium discovery searches PATH without executing candidate programs", async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), "mcp-vscode-browser-path-"));
-  const name = process.platform === "win32" ? "chrome.exe" : "chromium";
+  // Use the environment-driven Windows lookup so browsers installed in fixed
+  // Unix/macOS locations on CI runners cannot mask the synthetic PATH entry.
+  const name = "chrome.exe";
   const executable = path.join(root, name);
   await writeFile(executable, "test browser");
   if (process.platform !== "win32") await chmod(executable, 0o755);
   t.after(async () => rm(root, { recursive: true, force: true }));
 
   const found = await discoverChromiumExecutable({
-    platform: process.platform,
+    platform: "win32",
     env: { PATH: root },
   });
   assert.equal(found, executable);

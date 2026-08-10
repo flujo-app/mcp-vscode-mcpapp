@@ -3,6 +3,7 @@
 // Usage:
 //   npm run npm:publish -- <artifacts-dir> [--dry-run] [--tag <dist-tag>]
 //                          [--wait-for-login] [--no-login]
+//                          [--trusted-publishing] [--dispatcher-only]
 //
 // Publishing is deliberately split from packing: this script never builds a
 // tarball, it only verifies and uploads the ones the Release workflow produced.
@@ -18,6 +19,7 @@ import { createHash } from "node:crypto";
 import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
+import semver from "semver";
 import { list } from "tar";
 import { npmSpawn } from "./lib/npm-spawn.mjs";
 
@@ -31,6 +33,8 @@ const LOGIN_TIMEOUT_MS = 15 * 60 * 1000;
 
 const argv = process.argv.slice(2);
 const dryRun = argv.includes("--dry-run");
+const trustedPublishing = argv.includes("--trusted-publishing");
+const dispatcherOnly = argv.includes("--dispatcher-only");
 // Interactive login in this terminal is the default; these opt out of it.
 const waitForLoginOnly = argv.includes("--wait-for-login");
 const noLogin = argv.includes("--no-login");
@@ -46,12 +50,16 @@ const positional = argv.filter((value, index) => {
 const projectRoot = path.resolve(process.cwd());
 const rootManifest = JSON.parse(await readFile(path.join(projectRoot, "package.json"), "utf8"));
 const version = rootManifest.version;
+if (!semver.valid(version)) throw new Error(`package.json has invalid version ${JSON.stringify(version)}`);
+let runtimePackageVersion = dispatcherOnly ? undefined : version;
 const tag = `v${version}`;
 const artifactsDir = path.resolve(positional[0] ?? path.join(projectRoot, `release-artifacts-${tag}`));
 
 console.log(`Publishing ${rootManifest.name}@${version} (dist-tag: ${distTag})`);
 console.log(`Artifacts: ${artifactsDir}`);
 if (dryRun) console.log("DRY RUN - nothing will be uploaded\n");
+if (trustedPublishing) console.log("Authentication: npm trusted publishing (OIDC)");
+if (dispatcherOnly) console.log("Scope: dispatcher package only");
 
 const available = await readdir(artifactsDir).catch(() => {
   throw new Error(
@@ -63,12 +71,14 @@ const available = await readdir(artifactsDir).catch(() => {
 // Resolve every tarball up front so a missing file fails before we publish
 // anything, rather than halfway through and leaving a partial release.
 const planned = [];
-for (const target of PLATFORM_TARGETS) {
-  planned.push({
-    file: `mcp-vscode-${tag}-${target}.npm.tgz`,
-    expectedName: `${rootManifest.name}-${target}`,
-    target,
-  });
+if (!dispatcherOnly) {
+  for (const target of PLATFORM_TARGETS) {
+    planned.push({
+      file: `mcp-vscode-${tag}-${target}.npm.tgz`,
+      expectedName: `${rootManifest.name}-${target}`,
+      target,
+    });
+  }
 }
 planned.push({
   file: `mcp-vscode-${tag}-dispatcher.npm.tgz`,
@@ -87,7 +97,7 @@ if (missing.length > 0) {
 
 for (const entry of planned) {
   const file = path.join(artifactsDir, entry.file);
-  await verifyChecksum(file);
+  entry.integrity = await verifyChecksum(file);
   const manifest = await readPackedManifest(file);
 
   // The single most dangerous mistake in this layout is uploading a runtime
@@ -105,11 +115,25 @@ for (const entry of planned) {
     if (manifest.os || manifest.cpu) {
       throw new Error(`${entry.file} declares os/cpu; the dispatcher must stay platform-neutral`);
     }
-    for (const target of PLATFORM_TARGETS) {
-      const dependency = `${rootManifest.name}-${target}`;
-      if (manifest.optionalDependencies?.[dependency] !== version) {
-        throw new Error(`Dispatcher does not pin ${dependency}@${version}`);
-      }
+    const declaredRuntimeVersions = PLATFORM_TARGETS.map(
+      (target) => manifest.optionalDependencies?.[`${rootManifest.name}-${target}`],
+    );
+    const uniqueRuntimeVersions = new Set(declaredRuntimeVersions);
+    if (
+      uniqueRuntimeVersions.size !== 1 ||
+      typeof declaredRuntimeVersions[0] !== "string" ||
+      !semver.valid(declaredRuntimeVersions[0])
+    ) {
+      throw new Error(
+        `Dispatcher runtime dependencies must all pin one valid version, found ${JSON.stringify(declaredRuntimeVersions)}`,
+      );
+    }
+    const declaredRuntimeVersion = declaredRuntimeVersions[0];
+    if (dispatcherOnly) runtimePackageVersion = declaredRuntimeVersion;
+    if (declaredRuntimeVersion !== runtimePackageVersion) {
+      throw new Error(
+        `Dispatcher pins runtime ${declaredRuntimeVersion}, expected ${runtimePackageVersion} for this release`,
+      );
     }
   } else if (!manifest.os || !manifest.cpu) {
     throw new Error(`${entry.file} is missing the os/cpu gate required for a runtime package`);
@@ -120,11 +144,57 @@ for (const entry of planned) {
   console.log(`  verified ${entry.file} -> ${manifest.name}@${manifest.version}`);
 }
 
+if (dispatcherOnly) {
+  const missingRuntimes = PLATFORM_TARGETS.map((target) => `${rootManifest.name}-${target}`).filter((name) => {
+    const publishedVersion = npmViewField(name, runtimePackageVersion, "version");
+    return publishedVersion !== runtimePackageVersion;
+  });
+  if (missingRuntimes.length > 0) {
+    throw new Error(
+      `Cannot publish the dispatcher: its runtime version ${runtimePackageVersion} is missing from npm for:\n` +
+        missingRuntimes.map((name) => `  - ${name}`).join("\n"),
+    );
+  }
+  console.log(`  verified all platform runtime packages at ${runtimePackageVersion}`);
+}
+
 // Skip anything already on the registry so an interrupted run can simply be
 // re-run instead of needing manual bookkeeping.
 for (const entry of planned) {
-  entry.published = isPublished(entry.manifest.name, version);
-  if (entry.published) console.log(`  already published: ${entry.manifest.name}@${version}`);
+  const registryIntegrity = npmViewField(entry.manifest.name, version, "dist.integrity");
+  entry.published = registryIntegrity !== undefined;
+  if (!entry.published) continue;
+  if (typeof registryIntegrity !== "string" || registryIntegrity !== entry.integrity) {
+    throw new Error(
+      `${entry.manifest.name}@${version} already exists on npm with different bytes.\n` +
+        `  registry: ${JSON.stringify(registryIntegrity)}\n` +
+        `  artifact: ${entry.integrity}\n` +
+        "Refusing to resume around an unaudited package.",
+    );
+  }
+  console.log(`  already published with matching integrity: ${entry.manifest.name}@${version}`);
+}
+
+// An older failed workflow can be retried after a newer release has succeeded.
+// Never let that recovery move a primary dist-tag such as `latest` or `beta`
+// backwards; publish the missing immutable version under a recovery tag instead.
+for (const entry of planned) {
+  if (entry.published) continue;
+  const taggedVersion = npmViewField(entry.manifest.name, distTag, "version");
+  if (taggedVersion === undefined) continue;
+  if (typeof taggedVersion !== "string" || !semver.valid(taggedVersion)) {
+    throw new Error(
+      `npm returned invalid version ${JSON.stringify(taggedVersion)} for ${entry.manifest.name}@${distTag}`,
+    );
+  }
+  if (semver.gt(taggedVersion, version)) {
+    throw new Error(
+      `Refusing to move npm dist-tag ${distTag} backwards for ${entry.manifest.name}.\n` +
+        `  currently tagged: ${taggedVersion}\n` +
+        `  attempted release: ${version}\n` +
+        "Publish the missing immutable version with a non-primary recovery tag instead.",
+    );
+  }
 }
 
 if (planned.every((entry) => entry.published)) {
@@ -132,7 +202,7 @@ if (planned.every((entry) => entry.published)) {
   process.exit(0);
 }
 
-if (!dryRun) await ensureLogin();
+if (!dryRun && !trustedPublishing) await ensureLogin();
 
 console.log("");
 for (const entry of planned) {
@@ -144,6 +214,7 @@ for (const entry of planned) {
   }
   console.log(`publishing ${label} ...`);
   const args = ["publish", entry.path, "--access", "public", "--tag", distTag, "--registry", REGISTRY];
+  if (trustedPublishing) args.push("--provenance");
   const result = npmSpawn(args, { stdio: "inherit", cwd: artifactsDir });
   if (result.status !== 0) {
     throw new Error(
@@ -165,10 +236,12 @@ async function verifyChecksum(file) {
     throw new Error(`Missing checksum file: ${path.basename(checksumFile)}`);
   }
   const expected = recorded.trim().split(/\s+/)[0]?.toLowerCase();
-  const actual = createHash("sha256").update(await readFile(file)).digest("hex");
+  const bytes = await readFile(file);
+  const actual = createHash("sha256").update(bytes).digest("hex");
   if (expected !== actual) {
     throw new Error(`Checksum mismatch for ${path.basename(file)}: expected ${expected}, got ${actual}`);
   }
+  return `sha512-${createHash("sha512").update(bytes).digest("base64")}`;
 }
 
 async function readPackedManifest(file) {
@@ -192,11 +265,22 @@ async function readPackedManifest(file) {
   return JSON.parse(raw.replace(/^﻿/, ""));
 }
 
-function isPublished(name, wanted) {
-  const result = npmSpawn(["view", `${name}@${wanted}`, "version", "--registry", REGISTRY], {
+function npmViewField(name, wanted, field) {
+  const spec = `${name}@${wanted}`;
+  const result = npmSpawn(["view", spec, field, "--json", "--registry", REGISTRY], {
     encoding: "utf8",
   });
-  return result.status === 0 && result.stdout.trim() === wanted;
+  if (result.error) throw new Error(`Could not query ${spec}: ${result.error.message}`);
+
+  let payload;
+  try {
+    payload = JSON.parse(result.stdout || "null");
+  } catch {
+    throw new Error(`npm returned invalid JSON while querying ${spec} ${field}`);
+  }
+  if (result.status === 0) return payload;
+  if (payload?.error?.code === "E404") return undefined;
+  throw new Error(`npm view failed for ${spec}:\n${result.stderr || result.stdout || "unknown error"}`);
 }
 
 function currentUser() {
@@ -285,4 +369,3 @@ async function waitForExternalLogin() {
   }
   throw new Error(`Timed out after ${LOGIN_TIMEOUT_MS / 60000} minutes waiting for npm login`);
 }
-

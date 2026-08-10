@@ -9,6 +9,8 @@ npm ci
 npm run check
 ```
 
+Use a Conventional Commit title for the squash merge so Release Please can select the next version: `fix:` for a patch, `feat:` for a minor, and `type!:` plus a `BREAKING CHANGE:` footer for a major release. `chore:`, `docs:`, and `test:` changes do not create a release by themselves.
+
 Keep new filesystem operations routed through the confined `Workspace` abstraction. Mark destructive or open-world MCP tools accurately, and add an integration test for changes to authentication, proxying, transports, or bridge RPC.
 
 OpenVSCode itself is an upstream project. General editor behavior fixes should normally be contributed to Code OSS or OpenVSCode Server; this repository owns packaging, MCP integration, synchronization, and sandbox embedding.

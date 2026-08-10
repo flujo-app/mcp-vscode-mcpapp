@@ -12,6 +12,13 @@ export function npmSpawn(args, options = {}) {
   return spawnSync(commandLine, { ...options, shell: true });
 }
 
+// `npm view <single-version> <field> --json` normally returns the field value
+// directly, but some npm/registry combinations wrap it in a one-item array.
+// Both shapes describe the same single selected package version.
+export function normalizeNpmViewPayload(payload) {
+  return Array.isArray(payload) && payload.length === 1 ? payload[0] : payload;
+}
+
 // cmd.exe splits on whitespace and treats these characters as operators, so quote
 // any argument containing them (paths with spaces, scoped names, URLs).
 export function quoteForCmd(value) {

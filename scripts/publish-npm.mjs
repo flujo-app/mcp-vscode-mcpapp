@@ -21,7 +21,7 @@ import path from "node:path";
 import process from "node:process";
 import semver from "semver";
 import { list } from "tar";
-import { npmSpawn } from "./lib/npm-spawn.mjs";
+import { normalizeNpmViewPayload, npmSpawn } from "./lib/npm-spawn.mjs";
 
 const REGISTRY = "https://registry.npmjs.org";
 // Runtime packages MUST publish before the dispatcher that pins them as
@@ -278,7 +278,7 @@ function npmViewField(name, wanted, field) {
   } catch {
     throw new Error(`npm returned invalid JSON while querying ${spec} ${field}`);
   }
-  if (result.status === 0) return payload;
+  if (result.status === 0) return normalizeNpmViewPayload(payload);
   if (payload?.error?.code === "E404") return undefined;
   throw new Error(`npm view failed for ${spec}:\n${result.stderr || result.stdout || "unknown error"}`);
 }

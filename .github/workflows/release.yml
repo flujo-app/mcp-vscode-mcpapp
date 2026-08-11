@@ -135,7 +135,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@v8
         with:
           pattern: mcp-vscode-*-release
           path: artifacts
@@ -213,7 +213,7 @@ jobs:
       - name: Enable npm trusted publishing
         run: npm install --global npm@latest
       - run: npm ci --ignore-scripts
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@v8
         with:
           pattern: mcp-vscode-*-release
           path: artifacts
@@ -278,7 +278,7 @@ jobs:
       - name: Enable npm trusted publishing
         run: npm install --global npm@latest
       - run: npm ci --ignore-scripts
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@v8
         with:
           name: mcp-vscode-dispatcher-release
           path: artifacts

@@ -175,6 +175,21 @@ export function framePolicyForUrl(
   }
   for (const candidate of approvedFrameDomains ?? []) {
     if (candidate === "*") return "allowed";
+    // CSP host-source PORT wildcard, e.g. `http://127.0.0.1:*`. Hosts such as
+    // FLUJO canonicalize loopback grants to this form so a gateway's
+    // ephemeral-port restart cannot invalidate an already-committed policy.
+    // `new URL()` throws on `:*`, so the exact-origin branch below can never
+    // recognize it — match scheme + host explicitly and accept any port.
+    const portWildcard = /^([a-z][a-z0-9+.-]*):\/\/(\[[^\]]+\]|[^/:?#]+):\*$/i.exec(candidate);
+    if (portWildcard) {
+      if (
+        `${portWildcard[1].toLowerCase()}:` === target.protocol
+        && portWildcard[2].toLowerCase() === target.hostname.toLowerCase()
+      ) {
+        return "allowed";
+      }
+      continue;
+    }
     if (candidate.startsWith(`${target.protocol}//*.`)) {
       const suffix = candidate.slice(`${target.protocol}//*.`.length).replace(/\/$/, "");
       const hostWithPort = target.port ? `${target.hostname}:${target.port}` : target.hostname;

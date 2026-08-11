@@ -21,6 +21,32 @@ test("framePolicyForUrl accepts the exact workbench origin", () => {
   );
 });
 
+test("framePolicyForUrl accepts a CSP loopback port-wildcard grant (FLUJO canonical form)", () => {
+  // FLUJO collapses loopback grants to `scheme://host:*` so a gateway's
+  // ephemeral-port restart keeps the committed policy valid.
+  assert.equal(
+    framePolicyForUrl("http://127.0.0.1:45283/ide/abc/", ["http://127.0.0.1:*"], true),
+    "allowed",
+  );
+  assert.equal(
+    framePolicyForUrl("http://localhost:45283/", ["http://LOCALHOST:*"], true),
+    "allowed",
+  );
+  assert.equal(
+    framePolicyForUrl("http://[::1]:45283/", ["http://[::1]:*"], true),
+    "allowed",
+  );
+  // Wrong scheme or host must still be denied.
+  assert.equal(
+    framePolicyForUrl("https://127.0.0.1:45283/", ["http://127.0.0.1:*"], true),
+    "denied",
+  );
+  assert.equal(
+    framePolicyForUrl("http://192.168.1.20:45283/", ["http://127.0.0.1:*"], true),
+    "denied",
+  );
+});
+
 test("framePolicyForUrl rejects an absent or different approved origin", () => {
   assert.equal(framePolicyForUrl("https://editor.example.test/", [], true), "denied");
   assert.equal(

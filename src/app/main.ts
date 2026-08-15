@@ -104,7 +104,7 @@ if (window.__MCP_VSCODE_DEBUG__) {
 
 async function connectMcpApp(): Promise<void> {
   app = new App(
-    { name: "MCP VS Code", version: "0.2.2" }, // x-release-please-version
+    { name: "MCP VS Code", version: "0.2.3" }, // x-release-please-version
     { availableDisplayModes: ["inline", "fullscreen", "pip"] },
   );
   app.ontoolresult = (result) => {

@@ -127,7 +127,7 @@ Default mode honestly falls back to a browser when the tested Claude Desktop hos
   "mcpServers": {
     "vscode": {
       "command": "npx",
-      "args": ["-y", "@mario.andreschak/mcp-vscode@0.2.2", "--stdio"],
+      "args": ["-y", "@mario.andreschak/mcp-vscode@0.2.3", "--stdio"],
       "env": {
         "MCP_VSCODE_WORKSPACE": "C:\\path\\to\\repository"
       }
@@ -143,7 +143,7 @@ To test genuine inline streaming instead:
   "mcpServers": {
     "vscode": {
       "command": "npx",
-      "args": ["-y", "@mario.andreschak/mcp-vscode@0.2.2", "--stdio"],
+      "args": ["-y", "@mario.andreschak/mcp-vscode@0.2.3", "--stdio"],
       "env": {
         "MCP_VSCODE_WORKSPACE": "C:\\path\\to\\repository",
         "MCP_VSCODE_RENDER_MODE": "stream",
@@ -248,11 +248,11 @@ With Node.js 22 or newer, `npx` starts the bundled stdio server on Windows x64, 
 
 <!-- x-release-please-start-version -->
 ```powershell
-npx -y @mario.andreschak/mcp-vscode@0.2.2 --stdio --workspace "C:\path\to\repository"
+npx -y @mario.andreschak/mcp-vscode@0.2.3 --stdio --workspace "C:\path\to\repository"
 ```
 
 ```bash
-npx -y @mario.andreschak/mcp-vscode@0.2.2 --stdio --workspace "/path/to/repository"
+npx -y @mario.andreschak/mcp-vscode@0.2.3 --stdio --workspace "/path/to/repository"
 ```
 <!-- x-release-please-end -->
 
@@ -335,11 +335,11 @@ Routine release flow:
 
 <!-- x-release-please-start-version -->
 ```bash
-gh release download v0.2.2 \
-  --dir release-artifacts-v0.2.2 \
+gh release download v0.2.3 \
+  --dir release-artifacts-v0.2.3 \
   --pattern '*.npm.tgz*'
-npm run npm:publish -- release-artifacts-v0.2.2 --dry-run
-npm run npm:publish -- release-artifacts-v0.2.2
+npm run npm:publish -- release-artifacts-v0.2.3 --dry-run
+npm run npm:publish -- release-artifacts-v0.2.3
 ```
 
 Useful authentication commands:
@@ -347,8 +347,8 @@ Useful authentication commands:
 ```bash
 npm run npm:whoami
 npm run npm:login
-npm run npm:publish:wait -- release-artifacts-v0.2.2
-npm run npm:publish -- release-artifacts-v0.2.2 --no-login
+npm run npm:publish:wait -- release-artifacts-v0.2.3
+npm run npm:publish -- release-artifacts-v0.2.3 --no-login
 ```
 <!-- x-release-please-end -->
 

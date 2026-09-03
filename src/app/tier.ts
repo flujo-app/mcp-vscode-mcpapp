@@ -182,9 +182,13 @@ export function framePolicyForUrl(
     // recognize it — match scheme + host explicitly and accept any port.
     const portWildcard = /^([a-z][a-z0-9+.-]*):\/\/(\[[^\]]+\]|[^/:?#]+):\*$/i.exec(candidate);
     if (portWildcard) {
+      const scheme = portWildcard[1];
+      const hostname = portWildcard[2];
       if (
-        `${portWildcard[1].toLowerCase()}:` === target.protocol
-        && portWildcard[2].toLowerCase() === target.hostname.toLowerCase()
+        scheme !== undefined
+        && hostname !== undefined
+        && `${scheme.toLowerCase()}:` === target.protocol
+        && hostname.toLowerCase() === target.hostname.toLowerCase()
       ) {
         return "allowed";
       }

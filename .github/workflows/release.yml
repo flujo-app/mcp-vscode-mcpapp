@@ -65,7 +65,7 @@ jobs:
           $archive = "mcp-vscode-${{ github.ref_name }}-${{ matrix.target }}.zip"
           Compress-Archive -LiteralPath "standalone\mcp-vscode-$packageVersion-${{ matrix.target }}" -DestinationPath $archive
           $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant()
-          Set-Content -LiteralPath "$archive.sha256" -Value "$hash  $archive"
+          node -e "const{writeFileSync}=require('node:fs');writeFileSync(process.argv[1],process.argv[2]+'\n')" "$archive.sha256" "$hash  $archive"
       # Every target now produces an npm runtime package, so `npx` works on all of
       # them rather than Windows alone.
       - name: Pack platform npm runtime package
@@ -309,7 +309,7 @@ jobs:
           $archive = "mcp-vscode-${{ inputs.recovery_tag }}-win32-x64.zip"
           Compress-Archive -LiteralPath "standalone\mcp-vscode-$packageVersion-win32-x64" -DestinationPath $archive
           $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant()
-          Set-Content -LiteralPath "$archive.sha256" -Value "$hash  $archive"
+          node -e "const{writeFileSync}=require('node:fs');writeFileSync(process.argv[1],process.argv[2]+'\n')" "$archive.sha256" "$hash  $archive"
       - name: Pack Windows npm runtime package
         shell: bash
         run: |
@@ -319,6 +319,12 @@ jobs:
           archive="mcp-vscode-${{ inputs.recovery_tag }}-win32-x64.npm.tgz"
           mv "platform-packages/win32-x64/${packed}" "$archive"
           node -e "const{createHash}=require('node:crypto'),{readFileSync}=require('node:fs');const a=process.argv[1];const h=createHash('sha256').update(readFileSync(a)).digest('hex');require('node:fs').writeFileSync(a+'.sha256',h+'  '+a+'\n')" "$archive"
+      # Save the expensive native result before any release-API interaction so
+      # a transient upload or verification failure never forces another build.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: mcp-vscode-win32-x64-release
+          path: mcp-vscode-${{ inputs.recovery_tag }}-win32-x64.*
       - name: Preserve rebuilt Windows artifacts
         shell: bash
         env:

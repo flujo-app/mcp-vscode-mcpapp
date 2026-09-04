@@ -9,6 +9,10 @@ on:
         description: Existing stable release tag whose audited npm assets should be published
         required: true
         type: string
+      source_run_id:
+        description: Failed release run whose successful Linux and dispatcher artifacts should be reused
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -30,7 +34,10 @@ jobs:
           - target: win32-x64
             os: windows-2022
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 150
+    # Native OpenVSCode Windows builds regularly exceed 150 minutes on hosted
+    # runners. Give the automatic release enough time to finish rather than
+    # cancelling the entire npm publication after all other targets succeed.
+    timeout-minutes: 360
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -221,11 +228,131 @@ jobs:
       - name: Verify and publish the audited npm artifacts
         run: npm run npm:publish -- artifacts --trusted-publishing
 
-  # Recover npm publishing from release assets that already passed the expensive
-  # platform builds. This runs the current, fixed publisher without rebuilding or
-  # replacing any immutable artifact.
+  # A timed-out matrix keeps successful job artifacts but skips the release and
+  # npm jobs. Preserve those audited bytes on the existing GitHub Release while
+  # the missing Windows target is rebuilt separately.
+  recover-existing-assets:
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          run-id: ${{ inputs.source_run_id }}
+          github-token: ${{ github.token }}
+          pattern: mcp-vscode-*-release
+          path: artifacts
+          merge-multiple: true
+      - name: Verify and preserve successful release artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          source_run=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/${{ inputs.source_run_id }}")
+          [[ $(jq -r '.head_branch' <<<"$source_run") == "${{ inputs.recovery_tag }}" ]] || {
+            echo "::error::Run ${{ inputs.source_run_id }} does not belong to tag ${{ inputs.recovery_tag }}."
+            exit 1
+          }
+          files=(artifacts/*)
+          checksums=(artifacts/*.sha256)
+          ((${#files[@]} > 0)) || { echo "::error::No artifacts were recovered from run ${{ inputs.source_run_id }}."; exit 1; }
+          ((${#checksums[@]} > 0)) || { echo "::error::The recovered artifacts have no checksums."; exit 1; }
+          (cd artifacts && sha256sum --check -- *.sha256)
+          release_json=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/${{ inputs.recovery_tag }}")
+          upload=()
+          for file in "${files[@]}"; do
+            name=$(basename "$file")
+            match=$(jq --arg name "$name" '[.assets[] | select(.name == $name)]' <<<"$release_json")
+            if [[ $(jq 'length' <<<"$match") == 0 ]]; then
+              upload+=("$file")
+              continue
+            fi
+            local_digest="sha256:$(sha256sum "$file" | cut -d' ' -f1)"
+            remote_digest=$(jq -r '.[0].digest // empty' <<<"$match")
+            [[ "$remote_digest" == "$local_digest" ]] || {
+              echo "::error::Existing release asset $name does not match the recovered artifact."
+              exit 1
+            }
+            echo "unchanged release asset: $name"
+          done
+          ((${#upload[@]} == 0)) || gh release upload "${{ inputs.recovery_tag }}" "${upload[@]}"
+
+  recover-windows-assets:
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    runs-on: windows-2022
+    timeout-minutes: 360
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.recovery_tag }}
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22.21.1
+          cache: npm
+      - run: npm ci
+      - run: node scripts/verify-release-tag.mjs ${{ inputs.recovery_tag }}
+      - run: npm run check
+      - run: npm run package:standalone -- win32-x64
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MCP_VSCODE_BUILD_ROOT: ${{ format('{0}\mcp-vscode-openvscode-build', runner.temp) }}
+      - name: Archive Windows release
+        shell: pwsh
+        run: |
+          $packageVersion = node -p "require('./package.json').version"
+          $archive = "mcp-vscode-${{ inputs.recovery_tag }}-win32-x64.zip"
+          Compress-Archive -LiteralPath "standalone\mcp-vscode-$packageVersion-win32-x64" -DestinationPath $archive
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant()
+          Set-Content -LiteralPath "$archive.sha256" -Value "$hash  $archive"
+      - name: Pack Windows npm runtime package
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/build-platform-packages.mjs win32-x64
+          packed=$(cd platform-packages/win32-x64 && npm pack --silent | tail -n 1)
+          archive="mcp-vscode-${{ inputs.recovery_tag }}-win32-x64.npm.tgz"
+          mv "platform-packages/win32-x64/${packed}" "$archive"
+          node -e "const{createHash}=require('node:crypto'),{readFileSync}=require('node:fs');const a=process.argv[1];const h=createHash('sha256').update(readFileSync(a)).digest('hex');require('node:fs').writeFileSync(a+'.sha256',h+'  '+a+'\n')" "$archive"
+      - name: Preserve rebuilt Windows artifacts
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(mcp-vscode-${{ inputs.recovery_tag }}-win32-x64*)
+          ((${#files[@]} == 4)) || { echo "::error::Expected four Windows release files, found ${#files[@]}."; exit 1; }
+          (sha256sum --check -- *.sha256)
+          release_json=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/${{ inputs.recovery_tag }}")
+          upload=()
+          for file in "${files[@]}"; do
+            name=$(basename "$file")
+            match=$(jq --arg name "$name" '[.assets[] | select(.name == $name)]' <<<"$release_json")
+            if [[ $(jq 'length' <<<"$match") == 0 ]]; then
+              upload+=("$file")
+              continue
+            fi
+            local_digest="sha256:$(sha256sum "$file" | cut -d' ' -f1)"
+            remote_digest=$(jq -r '.[0].digest // empty' <<<"$match")
+            [[ "$remote_digest" == "$local_digest" ]] || {
+              echo "::error::Existing release asset $name does not match the rebuilt artifact."
+              exit 1
+            }
+            echo "unchanged release asset: $name"
+          done
+          ((${#upload[@]} == 0)) || gh release upload "${{ inputs.recovery_tag }}" "${upload[@]}"
+
+  # Publish only after every platform artifact exists on the immutable release.
   recover-npm:
     if: ${{ github.event_name == 'workflow_dispatch' }}
+    needs: [recover-existing-assets, recover-windows-assets]
     runs-on: ubuntu-latest
     environment: npm-publish
     permissions:
@@ -233,12 +360,14 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.recovery_tag }}
       - uses: actions/setup-node@v7
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
           package-manager-cache: false
-      - name: Verify the recovery tag matches this publisher version
+      - name: Verify the recovery checkout and tag
         run: node scripts/verify-release-tag.mjs "${{ inputs.recovery_tag }}"
       - name: Enable npm trusted publishing
         run: npm install --global npm@latest

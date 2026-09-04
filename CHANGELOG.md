@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.4](https://github.com/flujo-app/mcp-vscode-mcpapp/compare/v0.2.3...v0.2.4) (2026-09-03)
+
+
+### Bug Fixes
+
+* **app:** satisfy strict capture checks for frame policy ([2eabcba](https://github.com/flujo-app/mcp-vscode-mcpapp/commit/2eabcba41e3dc5489fedb527c3802977a13052c4))
+
 ## [0.2.3](https://github.com/flujo-app/mcp-vscode-mcpapp/compare/v0.2.2...v0.2.3) (2026-08-15)
 
 

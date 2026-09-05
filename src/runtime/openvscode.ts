@@ -219,7 +219,7 @@ export class OpenVscodeRuntime {
       throw new McpVscodeError("Built VS Code bridge extension not found", "BRIDGE_EXTENSION_NOT_FOUND");
     }
     const workspaceHash = createHash("sha256").update(this.#workspaceRoot).digest("hex").slice(0, 8);
-    const destination = path.join(extensionsDir, `flujo.mcp-vscode-0.2.4-${workspaceHash}`); // x-release-please-version
+    const destination = path.join(extensionsDir, `flujo.mcp-vscode-0.2.5-${workspaceHash}`); // x-release-please-version
     await cp(source, destination, { recursive: true, force: true });
   }
 

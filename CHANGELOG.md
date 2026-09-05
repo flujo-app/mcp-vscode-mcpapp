@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.5](https://github.com/flujo-app/mcp-vscode-mcpapp/compare/v0.2.4...v0.2.5) (2026-09-05)
+
+
+### Bug Fixes
+
+* **release:** preserve Windows artifacts with portable checksums ([87c6776](https://github.com/flujo-app/mcp-vscode-mcpapp/commit/87c677674bdc00d89fd24feb09768efa98762747))
+* **release:** recover timed-out platform builds ([445f86c](https://github.com/flujo-app/mcp-vscode-mcpapp/commit/445f86cc35bd76c22c6c9829f24cab53d1f1c4e0))
+
 ## [0.2.4](https://github.com/flujo-app/mcp-vscode-mcpapp/compare/v0.2.3...v0.2.4) (2026-09-03)
 
 

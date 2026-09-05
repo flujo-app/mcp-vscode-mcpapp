@@ -3,7 +3,7 @@
   "name": "io.github.mario-andreschak/mcp-vscode",
   "title": "MCP VS Code",
   "description": "A self-hosted VS Code workbench embedded as an interactive MCP App.",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "repository": {
     "url": "https://github.com/flujo-app/mcp-vscode-mcpapp",
     "source": "github"
@@ -22,7 +22,7 @@
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@mario.andreschak/mcp-vscode",
-      "version": "0.2.4",
+      "version": "0.2.5",
       "transport": {
         "type": "stdio"
       },

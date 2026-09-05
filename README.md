@@ -1,12 +1,9 @@
 # MCP VS Code
 
 MCP VS Code runs a self-hosted Code OSS/OpenVSCode workbench beside an MCP server so the human and the model operate the same workspace, open editors, diagnostics, commands, extensions, and terminal sessions.
-
-> **No-facsimile guarantee:** every editor UI shown by this project is the genuine OpenVSCode workbench. The MCP App never replaces it with a hand-built editor or terminal while continuing to call the result VS Code. If the real workbench cannot be displayed, the App says so and offers the same workbench in a browser when a reachable URL exists.
-
 This is not remote control of a separately installed desktop VS Code. Supported distributions carry their own OpenVSCode runtime and bridge extension. Microsoft-hosted `vscode.dev` is not used because it disallows framing.
 
-> **Project status:** functional v0.2 implementation. Default releases target Windows x64, Linux x64, and Linux ARM64. macOS is not supported because upstream publishes no OpenVSCode Server runtime for Darwin.
+<img width="1812" height="1080" alt="image" src="https://github.com/user-attachments/assets/ff466b17-b858-4a0c-9bb2-cda56c98e150" />
 
 ## The caveman picture
 

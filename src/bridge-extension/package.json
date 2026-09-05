@@ -2,7 +2,7 @@
   "name": "mcp-vscode",
   "displayName": "MCP VS Code Bridge",
   "description": "Synchronizes the embedded OpenVSCode workbench with the MCP server.",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "publisher": "flujo",
   "license": "MIT",
   "engines": {

@@ -1,7 +1,7 @@
 import { parseArgs } from "node:util";
 import path from "node:path";
 import process from "node:process";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import { VscodeCore } from "./core/core.js";
 import { Gateway } from "./http/gateway.js";
 import { runtimeBrokerRegistrationFromEnv } from "./http/runtime-registration.js";
@@ -35,23 +35,25 @@ const parsed = parseArgs({
 });
 
 if (parsed.values.help) {
-  process.stdout.write(`mcp-vscode [options]\n\n` +
-    `  --stdio                 Serve MCP over stdio (also starts the local UI gateway)\n` +
-    `  --http                  Serve Streamable HTTP (default when --stdio is absent)\n` +
-    `  --https                 Enable TLS; requires --cert and --key\n` +
-    `  --host <address>        Gateway bind address (default 127.0.0.1)\n` +
-    `  --port <number>         Gateway port, 0 chooses a free port\n` +
-    `  --workspace <path>      Workspace root exposed to VS Code and MCP tools\n` +
-    `                          (or set MCP_VSCODE_WORKSPACE)\n` +
-    `  --public-url <url>      Browser-visible gateway origin for remote deployments\n` +
-    `  --auth-token <token>    Bearer token required by the /mcp endpoint\n` +
-    `  --cert/--key <path>     PEM TLS certificate and private key\n` +
-    `  --openvscode-root <dir> Override the bundled OpenVSCode runtime location\n` +
-    `  --ide-url <url>         Development-only external IDE target\n\n` +
-    `Experimental environment options:\n` +
-    `  MCP_VSCODE_RENDER_MODE=stream       Pixel-stream the genuine workbench\n` +
-    `  MCP_VSCODE_STREAM_BROWSER=<path>    Override Edge/Chrome/Chromium discovery\n` +
-    `  MCP_VSCODE_STREAM_NO_SANDBOX=1      Disable Chromium sandbox (unsafe)\n`);
+  process.stdout.write(
+    `mcp-vscode [options]\n\n` +
+      `  --stdio                 Serve MCP over stdio (also starts the local UI gateway)\n` +
+      `  --http                  Serve Streamable HTTP (default when --stdio is absent)\n` +
+      `  --https                 Enable TLS; requires --cert and --key\n` +
+      `  --host <address>        Gateway bind address (default 127.0.0.1)\n` +
+      `  --port <number>         Gateway port, 0 chooses a free port\n` +
+      `  --workspace <path>      Workspace root exposed to VS Code and MCP tools\n` +
+      `                          (or set MCP_VSCODE_WORKSPACE)\n` +
+      `  --public-url <url>      Browser-visible gateway origin for remote deployments\n` +
+      `  --auth-token <token>    HTTP token; prefer MCP_VSCODE_AUTH_TOKEN environment variable\n` +
+      `  --cert/--key <path>     PEM TLS certificate and private key\n` +
+      `  --openvscode-root <dir> Override the bundled OpenVSCode runtime location\n` +
+      `  --ide-url <url>         Development-only external IDE target\n\n` +
+      `Experimental environment options:\n` +
+      `  MCP_VSCODE_RENDER_MODE=stream       Pixel-stream the genuine workbench\n` +
+      `  MCP_VSCODE_STREAM_BROWSER=<path>    Override Edge/Chrome/Chromium discovery\n` +
+      `  MCP_VSCODE_STREAM_NO_SANDBOX=1      Disable Chromium sandbox (unsafe)\n`,
+  );
   process.exit(0);
 }
 
@@ -63,7 +65,8 @@ async function main(): Promise<void> {
   // but an implicit cwd is now reported: server.json declares the workspace as
   // required, and silently inheriting the spawner's cwd is how the root ends up
   // pointing at an unrelated directory such as a mounted volume root.
-  const configuredWorkspace = values.workspace ?? process.env.MCP_VSCODE_WORKSPACE;
+  const configuredWorkspace =
+    values.workspace ?? process.env.MCP_VSCODE_WORKSPACE;
   const workspaceRoot = path.resolve(configuredWorkspace ?? process.cwd());
   const host = values.host ?? "127.0.0.1";
   const renderMode = parseRenderMode(process.env.MCP_VSCODE_RENDER_MODE);
@@ -73,21 +76,30 @@ async function main(): Promise<void> {
     process.env.MCP_VSCODE_STREAM_NO_SANDBOX,
   );
   const port = Number.parseInt(values.port ?? "0", 10);
-  if (!Number.isInteger(port) || port < 0 || port > 65_535) throw new Error(`Invalid port: ${values.port}`);
+  if (!Number.isInteger(port) || port < 0 || port > 65_535)
+    throw new Error(`Invalid port: ${values.port}`);
   if (values.https && (!values.cert || !values.key)) {
     throw new Error("--https requires both --cert and --key");
   }
-  if (!isLoopback(host) && !values["auth-token"]) {
-    throw new Error("Binding beyond loopback requires --auth-token");
+  const authToken = values["auth-token"] ?? process.env.MCP_VSCODE_AUTH_TOKEN;
+  if (
+    (!values.stdio || authToken !== undefined) &&
+    !/^[\x21-\x7e]{32,256}$/.test(authToken ?? "")
+  ) {
+    throw new Error(
+      "HTTP requires MCP_VSCODE_AUTH_TOKEN (32–256 printable non-space characters)",
+    );
   }
+  if (!isLoopback(host) && !authToken)
+    throw new Error("Binding beyond loopback requires MCP_VSCODE_AUTH_TOKEN");
   if (!isLoopback(host) && !values.https) {
     throw new Error("Binding beyond loopback requires --https");
   }
 
   if (!configuredWorkspace) {
     process.stderr.write(
-      `[mcp-vscode] No workspace configured; using the current directory: ${workspaceRoot}\n`
-      + `[mcp-vscode] Set MCP_VSCODE_WORKSPACE or pass --workspace to pin the workspace root\n`,
+      `[mcp-vscode] No workspace configured; using the current directory: ${workspaceRoot}\n` +
+        `[mcp-vscode] Set MCP_VSCODE_WORKSPACE or pass --workspace to pin the workspace root\n`,
     );
   }
 
@@ -96,8 +108,12 @@ async function main(): Promise<void> {
   const runtime = new OpenVscodeRuntime({
     core,
     workspaceRoot,
-    ...(values["state-dir"] ? { stateRoot: path.resolve(values["state-dir"]) } : {}),
-    ...(values["openvscode-root"] ? { openVscodeRoot: path.resolve(values["openvscode-root"]) } : {}),
+    ...(values["state-dir"]
+      ? { stateRoot: path.resolve(values["state-dir"]) }
+      : {}),
+    ...(values["openvscode-root"]
+      ? { openVscodeRoot: path.resolve(values["openvscode-root"]) }
+      : {}),
     ...(values["ide-url"] ? { externalIdeUrl: values["ide-url"] } : {}),
   });
   const gateway = new Gateway({
@@ -107,7 +123,7 @@ async function main(): Promise<void> {
     port,
     appHtmlPath: defaultAppHtmlPath(),
     ...(values["public-url"] ? { publicUrl: values["public-url"] } : {}),
-    ...(values["auth-token"] ? { authToken: values["auth-token"] } : {}),
+    ...(authToken ? { authToken } : {}),
     stream: {
       enabled: renderMode === "stream",
       ...(process.env.MCP_VSCODE_STREAM_BROWSER
@@ -124,40 +140,57 @@ async function main(): Promise<void> {
         }
       : {}),
     ...(values.https && values.cert && values.key
-      ? { tls: { certPath: path.resolve(values.cert), keyPath: path.resolve(values.key) } }
+      ? {
+          tls: {
+            certPath: path.resolve(values.cert),
+            keyPath: path.resolve(values.key),
+          },
+        }
       : {}),
   });
   const address = await gateway.start();
   const bridgeUrl = gateway.localBridgeUrl;
-  const runtimeStatus = await runtime.start({ gatewayOrigin: address.origin, bridgeUrl });
+  const runtimeStatus = await runtime.start({
+    gatewayOrigin: address.origin,
+    bridgeUrl,
+  });
   if (runtimeBroker) {
-    process.stderr.write(`[mcp-vscode] FLUJO App runtime origin: ${address.origin}\n`);
+    process.stderr.write(
+      `[mcp-vscode] FLUJO App runtime origin: ${address.origin}\n`,
+    );
   } else {
     process.stderr.write(`[mcp-vscode] UI gateway: ${address.origin}/app\n`);
     process.stderr.write(`[mcp-vscode] MCP endpoint: ${address.origin}/mcp\n`);
   }
   if (runtimeStatus.browserUrl) {
-    process.stderr.write(`[mcp-vscode] OpenVSCode: ${redactWorkbenchCapability(runtimeStatus.browserUrl)}\n`);
-  }
-  else process.stderr.write(`[mcp-vscode] OpenVSCode unavailable: ${runtimeStatus.error ?? "unknown error"}\n`);
+    process.stderr.write(
+      `[mcp-vscode] OpenVSCode: ${redactWorkbenchCapability(runtimeStatus.browserUrl)}\n`,
+    );
+  } else
+    process.stderr.write(
+      `[mcp-vscode] OpenVSCode unavailable: ${runtimeStatus.error ?? "unknown error"}\n`,
+    );
   if (renderMode === "stream") {
-    process.stderr.write("[mcp-vscode] Experimental genuine-workbench pixel streaming enabled\n");
+    process.stderr.write(
+      "[mcp-vscode] Experimental genuine-workbench pixel streaming enabled\n",
+    );
   }
 
-  let stdioServer: ReturnType<typeof createMcpServer> | undefined;
+  let stdioServer: ReturnType<typeof serveStdio> | undefined;
+  let closing: Promise<void> | undefined;
+  const shutdown = () =>
+    (closing ??= (async () => {
+      await stdioServer?.close();
+      await runtime.close();
+      await core.close();
+      await gateway.close();
+    })());
   if (values.stdio) {
-    stdioServer = createMcpServer(gateway.mcpContext());
-    await stdioServer.connect(new StdioServerTransport());
+    stdioServer = serveStdio(() => createMcpServer(gateway.mcpContext()));
+    process.stdin.once("end", () => void shutdown());
   }
-
-  const shutdown = async () => {
-    await stdioServer?.close();
-    await gateway.close();
-    runtime.close();
-    await core.close();
-  };
-  process.once("SIGINT", () => void shutdown().finally(() => process.exit(0)));
-  process.once("SIGTERM", () => void shutdown().finally(() => process.exit(0)));
+  process.once("SIGINT", () => void shutdown());
+  process.once("SIGTERM", () => void shutdown());
 }
 
 function isLoopback(host: string): boolean {

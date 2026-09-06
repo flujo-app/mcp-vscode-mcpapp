@@ -12,7 +12,8 @@ const FAST_TIMEOUT_MS = 1_000;
 
 class WindowHarness extends EventTarget {
   setTimeout(handler: TimerHandler, timeout = 0, ...args: unknown[]): number {
-    const callback = typeof handler === "function" ? () => handler(...args) : () => undefined;
+    const callback =
+      typeof handler === "function" ? () => handler(...args) : () => undefined;
     return globalThis.setTimeout(callback, timeout) as unknown as number;
   }
 
@@ -22,7 +23,9 @@ class WindowHarness extends EventTarget {
 
   reportWorkbenchAlive(): void {
     const event = new Event("message") as MessageEvent;
-    Object.defineProperty(event, "data", { value: { type: "mcp-vscode:workbench-alive" } });
+    Object.defineProperty(event, "data", {
+      value: { type: "mcp-vscode:workbench-alive" },
+    });
     this.dispatchEvent(event);
   }
 }
@@ -44,7 +47,8 @@ class FrameHarness extends EventTarget {
   }
 
   set src(value: string) {
-    if (this.mode === "throw") throw new Error("host rejected iframe navigation");
+    if (this.mode === "throw")
+      throw new Error("host rejected iframe navigation");
     this.#src = value;
     if (this.mode === "alive") {
       queueMicrotask(() => this.browserWindow.reportWorkbenchAlive());
@@ -84,7 +88,7 @@ async function startGateway(): Promise<GatewayContext> {
       ideUrl: `${started.origin}/workbench/`,
     },
     async close() {
-      runtime.close();
+      await runtime.close();
       await core.close();
       await gateway.close();
       await rm(root, { recursive: true, force: true });
@@ -96,8 +100,15 @@ function installBrowserGlobals(
   t: TestContext,
   browserWindow: WindowHarness,
 ): void {
-  const windowDescriptor = Object.getOwnPropertyDescriptor(globalThis, "window");
-  Object.defineProperty(globalThis, "window", { configurable: true, writable: true, value: browserWindow });
+  const windowDescriptor = Object.getOwnPropertyDescriptor(
+    globalThis,
+    "window",
+  );
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    writable: true,
+    value: browserWindow,
+  });
   t.after(() => {
     restoreGlobal("window", windowDescriptor);
   });
@@ -172,7 +183,8 @@ test("automatic real-workbench -> browser selection is honest across host permut
   const previousDisablePty = process.env.MCP_VSCODE_DISABLE_PTY;
   process.env.MCP_VSCODE_DISABLE_PTY = "1";
   t.after(() => {
-    if (previousDisablePty === undefined) delete process.env.MCP_VSCODE_DISABLE_PTY;
+    if (previousDisablePty === undefined)
+      delete process.env.MCP_VSCODE_DISABLE_PTY;
     else process.env.MCP_VSCODE_DISABLE_PTY = previousDisablePty;
   });
 
@@ -185,10 +197,14 @@ test("automatic real-workbench -> browser selection is honest across host permut
       const frame = new FrameHarness(browserWindow, row.frame);
       const session = row.session?.(gateway.session) ?? gateway.session;
 
-      const result = await selectTier(session, frame as unknown as HTMLIFrameElement, {
-        embeddedTimeoutMs: FAST_TIMEOUT_MS,
-        framePolicy: row.framePolicy,
-      });
+      const result = await selectTier(
+        session,
+        frame as unknown as HTMLIFrameElement,
+        {
+          embeddedTimeoutMs: FAST_TIMEOUT_MS,
+          framePolicy: row.framePolicy,
+        },
+      );
 
       assert.equal(result.tier, row.expected);
       assert.ok(result.reason.length > 0);
@@ -206,8 +222,25 @@ test("a changed gateway origin is re-probed instead of reusing a previous embedd
   assert.notEqual(first.origin, second.origin);
   const browserWindow = new WindowHarness();
   installBrowserGlobals(t, browserWindow);
-  const frame = new FrameHarness(browserWindow, "alive") as unknown as HTMLIFrameElement;
+  const frame = new FrameHarness(
+    browserWindow,
+    "alive",
+  ) as unknown as HTMLIFrameElement;
 
-  assert.equal((await selectTier(first.session, frame, { embeddedTimeoutMs: FAST_TIMEOUT_MS })).tier, "embedded");
-  assert.equal((await selectTier(second.session, frame, { embeddedTimeoutMs: FAST_TIMEOUT_MS })).tier, "embedded");
+  assert.equal(
+    (
+      await selectTier(first.session, frame, {
+        embeddedTimeoutMs: FAST_TIMEOUT_MS,
+      })
+    ).tier,
+    "embedded",
+  );
+  assert.equal(
+    (
+      await selectTier(second.session, frame, {
+        embeddedTimeoutMs: FAST_TIMEOUT_MS,
+      })
+    ).tier,
+    "embedded",
+  );
 });

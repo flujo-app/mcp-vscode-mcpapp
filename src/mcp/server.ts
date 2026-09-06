@@ -1,13 +1,9 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import {
-  registerAppResource,
-  registerAppTool,
-  RESOURCE_MIME_TYPE,
-} from "@modelcontextprotocol/ext-apps/server";
+import { McpServer } from "@modelcontextprotocol/server";
+import type { CallToolResult } from "@modelcontextprotocol/server";
+const RESOURCE_MIME_TYPE = "text/html;profile=mcp-app";
 import { z } from "zod";
 import type { VscodeCore } from "../core/core.js";
 import { McpVscodeError, serializeError } from "../core/errors.js";
@@ -24,6 +20,7 @@ import {
   terminalCreateShape,
   terminalKillShape,
   terminalReadShape,
+  terminalRunShape,
   terminalResizeShape,
   terminalWriteShape,
   workspaceDeleteShape,
@@ -49,44 +46,58 @@ export function createMcpServer(context: McpServerContext): McpServer {
   const server = new McpServer({ name: "mcp-vscode", version: "0.2.4" }); // x-release-please-version
 
   /** Editor and diagnostics tools always target the genuine OpenVSCode bridge. */
-  const callEditor = async (method: string, params?: unknown, timeoutMs?: number): Promise<Record<string, unknown>> => {
+  const callEditor = async (
+    method: string,
+    params?: unknown,
+    timeoutMs?: number,
+  ): Promise<Record<string, unknown>> => {
     const result = await core.bridge.call<unknown>(method, params, timeoutMs);
-    const base = result && typeof result === "object" && !Array.isArray(result)
-      ? (result as Record<string, unknown>)
-      : { value: result };
+    const base =
+      result && typeof result === "object" && !Array.isArray(result)
+        ? (result as Record<string, unknown>)
+        : { value: result };
     return { ...base, surface: "vscode" };
   };
 
-  registerAppTool(
-    server,
+  server.registerTool(
     "vscode_open",
     {
       title: "Open VS Code",
-      description: "Open the live, human-interactive VS Code workbench embedded in the MCP App.",
-      inputSchema: {},
+      description:
+        "Open the live, human-interactive VS Code workbench embedded in the MCP App.",
+      inputSchema: z.object({}),
       _meta: {
+        "ui/resourceUri": MCP_VSCODE_APP_RESOURCE_URI,
         ui: {
           resourceUri: MCP_VSCODE_APP_RESOURCE_URI,
           visibility: ["model", "app"],
         },
       },
-      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        openWorldHint: false,
+      },
     },
     async () => success(sessionPayload(context), appResultMeta(context)),
   );
 
-  registerAppResource(
-    server,
+  server.registerResource(
     "VS Code Workbench",
     MCP_VSCODE_APP_RESOURCE_URI,
     {
-      description: "Self-hosted Code OSS workbench with live MCP synchronization.",
+      description:
+        "Self-hosted Code OSS workbench with live MCP synchronization.",
+      mimeType: RESOURCE_MIME_TYPE,
       _meta: {
         ui: {
           prefersBorder: false,
           csp: {
             frameDomains: [context.gatewayOrigin],
-            connectDomains: [context.gatewayOrigin, websocketOrigin(context.gatewayOrigin)],
+            connectDomains: [
+              context.gatewayOrigin,
+              websocketOrigin(context.gatewayOrigin),
+            ],
           },
           permissions: { clipboardWrite: {} },
         },
@@ -105,7 +116,10 @@ export function createMcpServer(context: McpServerContext): McpServer {
                 prefersBorder: false,
                 csp: {
                   frameDomains: [context.gatewayOrigin],
-                  connectDomains: [context.gatewayOrigin, websocketOrigin(context.gatewayOrigin)],
+                  connectDomains: [
+                    context.gatewayOrigin,
+                    websocketOrigin(context.gatewayOrigin),
+                  ],
                 },
                 permissions: { clipboardWrite: {} },
               },
@@ -118,7 +132,8 @@ export function createMcpServer(context: McpServerContext): McpServer {
 
   registerTool(server, "workspace_status", {
     title: "Workspace status",
-    description: "Return the workspace, OpenVSCode, bridge, and terminal state.",
+    description:
+      "Return the workspace, OpenVSCode, bridge, and terminal state.",
     inputSchema: {},
     annotations: readOnly,
     handler: async () => sessionPayload(context),
@@ -130,32 +145,43 @@ export function createMcpServer(context: McpServerContext): McpServer {
     description: "List files and directories inside the configured workspace.",
     inputSchema: workspaceListShape,
     annotations: readOnly,
-    handler: async ({ path: userPath, recursive, maxEntries }) => ({
-      entries: await core.workspace.list(userPath, recursive, maxEntries),
-    }),
+    handler: async ({ path: userPath, recursive, maxEntries }) =>
+      await core.workspace.listDetailed(userPath, recursive, maxEntries),
   });
 
   registerTool(server, "fs_read", {
     title: "Read file",
-    description: "Read a UTF-8 or base64 file with a version hash for conflict-safe writes.",
+    description:
+      "Read a UTF-8 or base64 file with a version hash for conflict-safe writes.",
     inputSchema: workspaceReadShape,
     annotations: readOnly,
-    handler: async ({ path: userPath, encoding }) => await core.workspace.read(userPath, encoding),
+    handler: async ({ path: userPath, encoding }) =>
+      await core.workspace.read(userPath, encoding),
   });
 
   registerTool(server, "fs_write", {
     title: "Write file",
-    description: "Create or replace a workspace file. Use expectedVersion to prevent lost updates.",
+    description:
+      "Create or replace a workspace file. Use expectedVersion to prevent lost updates.",
     inputSchema: workspaceWriteShape,
-    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
     handler: async (args) => {
       if (args.expectedVersion) {
         const current = await core.workspace.read(args.path, args.encoding);
         if (current.version !== args.expectedVersion) {
-          throw new McpVscodeError("File changed since it was read", "VERSION_CONFLICT", {
-            expected: args.expectedVersion,
-            actual: current.version,
-          });
+          throw new McpVscodeError(
+            "File changed since it was read",
+            "VERSION_CONFLICT",
+            {
+              expected: args.expectedVersion,
+              actual: current.version,
+            },
+          );
         }
       }
       if (args.encoding === "utf8" && core.bridge.status().connected) {
@@ -168,17 +194,29 @@ export function createMcpServer(context: McpServerContext): McpServer {
 
   registerTool(server, "fs_delete", {
     title: "Delete file",
-    description: "Delete a workspace file or, with recursive=true, a directory. The workspace root is protected.",
+    description:
+      "Delete a workspace file or, with recursive=true, a directory. The workspace root is protected.",
     inputSchema: workspaceDeleteShape,
-    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
-    handler: async ({ path: userPath, recursive }) => await core.workspace.delete(userPath, recursive),
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: false,
+    },
+    handler: async ({ path: userPath, recursive }) =>
+      await core.workspace.delete(userPath, recursive),
   });
 
   registerTool(server, "fs_move", {
     title: "Move file",
     description: "Move or rename a file or directory inside the workspace.",
     inputSchema: workspaceMoveShape,
-    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: false,
+    },
     handler: async ({ from, to }) => await core.workspace.move(from, to),
   });
 
@@ -187,12 +225,13 @@ export function createMcpServer(context: McpServerContext): McpServer {
     description: "Search text files recursively inside the workspace.",
     inputSchema: workspaceSearchShape,
     annotations: readOnly,
-    handler: async (args) => ({ matches: await core.workspace.search(args) }),
+    handler: async (args) => await core.workspace.searchDetailed(args),
   });
 
   registerTool(server, "editor_open", {
     title: "Open editor",
-    description: "Open a workspace file in the visible VS Code editor and optionally reveal a range.",
+    description:
+      "Open a workspace file in the visible VS Code editor and optionally reveal a range.",
     inputSchema: {
       path: z.string().min(1),
       line: z.number().int().min(1).optional(),
@@ -200,13 +239,18 @@ export function createMcpServer(context: McpServerContext): McpServer {
       preview: z.boolean().default(false),
       preserveFocus: z.boolean().default(false),
     },
-    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      openWorldHint: false,
+    },
     handler: async (args) => await callEditor("editor.open", args),
   });
 
   registerTool(server, "editor_state", {
     title: "Get editor state",
-    description: "Return visible editors, active document, selections, dirty buffers, and workspace folders.",
+    description:
+      "Return visible editors, active document, selections, dirty buffers, and workspace folders.",
     inputSchema: {},
     annotations: readOnly,
     handler: async () => await callEditor("editor.state"),
@@ -222,31 +266,46 @@ export function createMcpServer(context: McpServerContext): McpServer {
       endLine: z.number().int().min(1),
       endColumn: z.number().int().min(1),
     },
-    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      openWorldHint: false,
+    },
     handler: async (args) => await callEditor("editor.setSelection", args),
   });
 
   registerTool(server, "editor_apply_edits", {
     title: "Apply visible edits",
-    description: "Apply one or more text edits through VS Code so dirty state, undo, and the human UI stay synchronized.",
+    description:
+      "Apply one or more text edits through VS Code so dirty state, undo, and the human UI stay synchronized.",
     inputSchema: {
       path: z.string().min(1),
-      edits: z.array(z.object({
-        startLine: z.number().int().min(1),
-        startColumn: z.number().int().min(1),
-        endLine: z.number().int().min(1),
-        endColumn: z.number().int().min(1),
-        text: z.string(),
-      })).min(1),
+      edits: z
+        .array(
+          z.object({
+            startLine: z.number().int().min(1),
+            startColumn: z.number().int().min(1),
+            endLine: z.number().int().min(1),
+            endColumn: z.number().int().min(1),
+            text: z.string(),
+          }),
+        )
+        .min(1),
       save: z.boolean().default(true),
     },
-    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: false,
+    },
     handler: async (args) => await callEditor("editor.applyEdits", args),
   });
 
   registerTool(server, "diagnostics_get", {
     title: "Get diagnostics",
-    description: "Return VS Code diagnostics for a file or the entire workspace.",
+    description:
+      "Return VS Code diagnostics for a file or the entire workspace.",
     inputSchema: { path: z.string().optional() },
     annotations: readOnly,
     handler: async (args) => await callEditor("diagnostics.get", args),
@@ -262,13 +321,20 @@ export function createMcpServer(context: McpServerContext): McpServer {
 
   registerTool(server, "vscode_execute_command", {
     title: "Execute VS Code command",
-    description: "Execute any registered VS Code command. This is the escape hatch for the complete extension command surface.",
+    description:
+      "Execute any registered VS Code command. This is the escape hatch for the complete extension command surface.",
     inputSchema: {
       command: z.string().min(1),
       arguments: z.array(z.unknown()).default([]),
     },
-    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
-    handler: async (args) => await core.bridge.call("commands.execute", args, 60_000),
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
+    handler: async (args) =>
+      await core.bridge.call("commands.execute", args, 60_000),
   });
 
   registerTool(server, "extensions_list", {
@@ -281,29 +347,67 @@ export function createMcpServer(context: McpServerContext): McpServer {
 
   registerTool(server, "extensions_install", {
     title: "Install extension",
-    description: "Install an extension by identifier or VSIX URI through the VS Code command surface.",
+    description:
+      "Install an extension by identifier or VSIX URI through the VS Code command surface.",
     inputSchema: { extension: z.string().min(1) },
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
-    handler: async ({ extension }) => await core.bridge.call("extensions.install", { extension }, 120_000),
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+    handler: async ({ extension }) =>
+      await core.bridge.call("extensions.install", { extension }, 120_000),
   });
 
   registerTool(server, "extensions_uninstall", {
     title: "Uninstall extension",
     description: "Uninstall a VS Code extension by identifier.",
     inputSchema: { extension: z.string().min(1) },
-    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
-    handler: async ({ extension }) => await core.bridge.call("extensions.uninstall", { extension }, 120_000),
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+    handler: async ({ extension }) =>
+      await core.bridge.call("extensions.uninstall", { extension }, 120_000),
   });
 
   registerTool(server, "terminal_create", {
     title: "Create terminal",
-    description: "Create a terminal session shared by MCP tools and the embedded VS Code UI.",
+    description:
+      "Create a terminal session shared by MCP tools and the embedded VS Code UI.",
     inputSchema: terminalCreateShape,
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
     handler: async ({ cwd, ...args }) => {
       const absoluteCwd = await core.workspace.resolve(cwd);
       return await core.terminals.create({ cwd: absoluteCwd, ...args });
     },
+  });
+
+  registerTool(server, "terminal_run", {
+    title: "Run command once",
+    description:
+      "Run an executable with structured arguments in the workspace, returning separate UTF-8 stdout/stderr, exit status, truncation and timeout/cancellation state. No implicit shell; choose a shell executable explicitly for shell syntax.",
+    inputSchema: terminalRunShape,
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
+    handler: async ({ cwd, ...args }, signal) =>
+      await core.terminals.run({
+        ...args,
+        cwd: await core.workspace.resolve(cwd),
+        signal,
+      }),
   });
 
   registerTool(server, "terminal_list", {
@@ -319,43 +423,65 @@ export function createMcpServer(context: McpServerContext): McpServer {
     description: "Read recent buffered output from a terminal session.",
     inputSchema: terminalReadShape,
     annotations: readOnly,
-    handler: async ({ id, tailCharacters }) => core.terminals.read(id, tailCharacters),
+    handler: async ({ id, tailCharacters, stripAnsi }) =>
+      core.terminals.read(id, tailCharacters, { stripAnsi }),
   });
 
   registerTool(server, "terminal_write", {
     title: "Write terminal input",
     description: "Write raw input to a shared terminal session.",
     inputSchema: terminalWriteShape,
-    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
-    handler: async ({ id, data }) => core.terminals.write(id, data),
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
+    handler: async ({ id, data, submit }) =>
+      core.terminals.write(id, data, { submit }),
   });
 
   registerTool(server, "terminal_resize", {
     title: "Resize terminal",
     description: "Resize a shared terminal PTY.",
     inputSchema: terminalResizeShape,
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-    handler: async ({ id, columns, rows }) => core.terminals.resize(id, columns, rows),
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+    handler: async ({ id, columns, rows }) =>
+      core.terminals.resize(id, columns, rows),
   });
 
   registerTool(server, "terminal_kill", {
     title: "Kill terminal",
     description: "Terminate a shared terminal process.",
     inputSchema: terminalKillShape,
-    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: false,
+    },
     handler: async ({ id }) => core.terminals.kill(id),
   });
 
   registerTool(server, "git_status", {
     title: "Git status",
-    description: "Return machine-readable Git status for the workspace repository.",
+    description:
+      "Return machine-readable Git status for the workspace repository.",
     inputSchema: {},
     annotations: readOnly,
-    handler: async () => processResult(await runProcess({
-      command: "git",
-      args: ["status", "--short", "--branch"],
-      cwd: core.workspace.root,
-    })),
+    handler: async () =>
+      processResult(
+        await runProcess({
+          command: "git",
+          args: ["status", "--short", "--branch"],
+          cwd: core.workspace.root,
+        }),
+      ),
   });
 
   registerTool(server, "git_diff", {
@@ -369,24 +495,39 @@ export function createMcpServer(context: McpServerContext): McpServer {
     handler: async ({ staged, path: userPath }) => {
       const args = ["diff", "--no-ext-diff", ...(staged ? ["--cached"] : [])];
       if (userPath) args.push("--", userPath);
-      return processResult(await runProcess({ command: "git", args, cwd: core.workspace.root }));
+      return processResult(
+        await runProcess({ command: "git", args, cwd: core.workspace.root }),
+      );
     },
   });
 
   registerTool(server, "git_run", {
     title: "Run Git command",
-    description: "Run a Git subcommand inside the workspace. Hooks are disabled for this invocation.",
+    description:
+      "Run a Git subcommand inside the workspace. Hooks are disabled for this invocation.",
     inputSchema: {
       arguments: z.array(z.string()).min(1),
       timeoutMs: z.number().int().min(1).max(300_000).default(60_000),
     },
-    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
-    handler: async ({ arguments: gitArgs, timeoutMs }) => processResult(await runProcess({
-      command: "git",
-      args: ["-c", `core.hooksPath=${process.platform === "win32" ? "NUL" : "/dev/null"}`, ...gitArgs],
-      cwd: core.workspace.root,
-      timeoutMs,
-    })),
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
+    handler: async ({ arguments: gitArgs, timeoutMs }) =>
+      processResult(
+        await runProcess({
+          command: "git",
+          args: [
+            "-c",
+            `core.hooksPath=${process.platform === "win32" ? "NUL" : "/dev/null"}`,
+            ...gitArgs,
+          ],
+          cwd: core.workspace.root,
+          timeoutMs,
+        }),
+      ),
   });
 
   return server;
@@ -412,31 +553,44 @@ function registerTool<Shape extends z.ZodRawShape>(
       idempotentHint?: boolean;
       openWorldHint?: boolean;
     };
-    handler: (args: z.infer<z.ZodObject<Shape>>) => Promise<unknown>;
+    handler: (
+      args: z.infer<z.ZodObject<Shape>>,
+      signal?: AbortSignal,
+    ) => Promise<unknown>;
     resultMeta?: () => Record<string, unknown> | undefined;
   },
 ): void {
-  const register = server.registerTool.bind(server) as (...args: unknown[]) => unknown;
+  const register = server.registerTool.bind(server) as (
+    ...args: unknown[]
+  ) => unknown;
   register(
     name,
     {
       title: config.title,
       description: config.description,
-      inputSchema: config.inputSchema,
+      inputSchema: z.object(config.inputSchema),
       annotations: config.annotations,
       _meta: { ui: { visibility: ["model", "app"] } },
     },
-    async (args: unknown): Promise<CallToolResult> => {
+    async (
+      args: unknown,
+      context?: { mcpReq?: { signal?: AbortSignal } },
+    ): Promise<CallToolResult> => {
       try {
         return success(
-          await config.handler(args as z.infer<z.ZodObject<Shape>>),
+          await config.handler(
+            args as z.infer<z.ZodObject<Shape>>,
+            context?.mcpReq?.signal,
+          ),
           config.resultMeta?.(),
         );
       } catch (error) {
         const serialized = serializeError(error);
         return {
           isError: true,
-          content: [{ type: "text", text: JSON.stringify(serialized, null, 2) }],
+          content: [
+            { type: "text", text: JSON.stringify(serialized, null, 2) },
+          ],
           structuredContent: { error: serialized },
         };
       }
@@ -444,7 +598,10 @@ function registerTool<Shape extends z.ZodRawShape>(
   );
 }
 
-function success(value: unknown, meta?: Record<string, unknown>): CallToolResult {
+function success(
+  value: unknown,
+  meta?: Record<string, unknown>,
+): CallToolResult {
   const structuredContent = asObject(value);
   return {
     content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }],
@@ -454,7 +611,8 @@ function success(value: unknown, meta?: Record<string, unknown>): CallToolResult
 }
 
 function asObject(value: unknown): Record<string, unknown> {
-  if (value && typeof value === "object" && !Array.isArray(value)) return value as Record<string, unknown>;
+  if (value && typeof value === "object" && !Array.isArray(value))
+    return value as Record<string, unknown>;
   return { value };
 }
 
@@ -471,14 +629,18 @@ function sessionPayload(context: McpServerContext): Record<string, unknown> {
   };
 }
 
-function appResultMeta(context: McpServerContext): Record<string, unknown> | undefined {
+function appResultMeta(
+  context: McpServerContext,
+): Record<string, unknown> | undefined {
   const meta: Record<string, unknown> = {};
   const ideUrl = context.runtime.status().browserUrl;
   if (ideUrl) {
     const value: WorkbenchIdeResultMeta = { ideUrl };
     meta[WORKBENCH_IDE_META_KEY] = value;
   }
-  const websocketUrl = context.stream?.status(context.gatewayOrigin).websocketUrl;
+  const websocketUrl = context.stream?.status(
+    context.gatewayOrigin,
+  ).websocketUrl;
   if (websocketUrl) {
     const value: WorkbenchStreamResultMeta = { websocketUrl };
     meta[WORKBENCH_STREAM_META_KEY] = value;
@@ -486,14 +648,18 @@ function appResultMeta(context: McpServerContext): Record<string, unknown> | und
   return Object.keys(meta).length > 0 ? meta : undefined;
 }
 
-function publicRuntimeStatus(status: ReturnType<OpenVscodeRuntime["status"]>): Record<string, unknown> {
+function publicRuntimeStatus(
+  status: ReturnType<OpenVscodeRuntime["status"]>,
+): Record<string, unknown> {
   return {
     state: status.state,
     ...(status.error ? { error: status.error } : {}),
   };
 }
 
-function processResult(result: Awaited<ReturnType<typeof runProcess>>): Record<string, unknown> {
+function processResult(
+  result: Awaited<ReturnType<typeof runProcess>>,
+): Record<string, unknown> {
   return {
     ...result,
     ok: result.exitCode === 0 && !result.timedOut,

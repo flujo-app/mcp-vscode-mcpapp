@@ -30,7 +30,8 @@
     "README.md",
     "LICENSE",
     "NOTICE",
-    "THIRD_PARTY_NOTICES.md"
+    "THIRD_PARTY_NOTICES.md",
+    "scripts/prepare-native-pty.mjs"
   ],
   "scripts": {
     "build": "node scripts/build.mjs",
@@ -56,21 +57,28 @@
     "mcp:validate": "node scripts/publish-mcp.mjs --dry-run",
     "package:standalone": "node scripts/package-standalone.mjs",
     "check": "npm run version:check && npm run typecheck && npm test && npm run build && npm run test:integration",
-    "prepack": "npm run check && npm run npm:verify-runtime"
+    "prepack": "npm run check && npm run npm:verify-runtime",
+    "test:protocol": "node scripts/verify-protocol.mjs",
+    "test:browser": "playwright test",
+    "postinstall": "node scripts/prepare-native-pty.mjs"
   },
   "dependencies": {
-    "@modelcontextprotocol/ext-apps": "1.7.5",
-    "@modelcontextprotocol/sdk": "1.30.0",
+    "@modelcontextprotocol/node": "2.0.0",
+    "@modelcontextprotocol/server": "2.0.0",
     "chokidar": "5.0.0",
     "express": "5.2.1",
     "http-proxy": "1.18.1",
-    "ws": "8.21.2",
+    "ws": "8.21.3",
     "zod": "4.4.3"
   },
   "optionalDependencies": {
     "node-pty": "1.1.0"
   },
   "devDependencies": {
+    "@modelcontextprotocol/client": "2.0.0",
+    "@modelcontextprotocol/ext-apps": "1.7.5",
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "@playwright/test": "1.63.0",
     "@types/express": "5.0.6",
     "@types/http-proxy": "1.17.17",
     "@types/node": "^22.0.0",

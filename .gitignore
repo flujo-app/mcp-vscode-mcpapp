@@ -16,3 +16,7 @@ Thumbs.db
 *.crt
 /release-artifacts-v*
 /.tools
+
+.test-browser/
+test-results/
+playwright-report/

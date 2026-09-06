@@ -100,12 +100,65 @@ All three displayed outcomes refer to the real OpenVSCode runtime. If that runti
 
 There is no special macOS editor fallback: without an OpenVSCode Server runtime, neither embedding, streaming, nor the external-browser view can provide the workbench.
 
+## Protocol and access policy
+
+The server uses stable split MCP TypeScript SDK 2.0.0 packages and the published
+2026-07-28 protocol through genuine stdio/HTTP factories. Legacy 2025-11-25 clients
+remain supported; HTTP uses stateless exchanges. The prebundled widget uses MCP
+Apps 1.7.5, whose version is separate from the core protocol. Apps and its SDK 1
+peer are build dependencies rather than a second production server implementation.
+
+HTTP/HTTPS requires an operator token even on loopback. A stdio-only launch still
+serves its UI capability routes but does not expose unauthenticated MCP or debug
+session data. Browser login uses a bearer header; the token is not placed in URLs,
+cookies or browser storage. The nested App receives its scoped IDE/stream
+capabilities through host-only metadata. It does not receive the operator token.
+
+Host authorities and browser origins must exactly match the loopback listener or
+the configured public origin. The gateway ignores forwarded Host headers. Opaque
+`Origin: null` is intentionally accepted only for the unguessable IDE path and
+the separately authenticated stream, so a sandboxed MCP App can load the real
+workbench. It is rejected on MCP, debug/session APIs and the editor bridge.
+HTTP JSON bodies are limited to 8 MiB; malformed bodies and proxy failures do
+not echo request data. Use trusted TLS remotely and configure the public origin
+and WebSocket proxy routes as documented below.
+
+One process represents one trusted operator and workspace. File tools enforce
+workspace confinement; terminal programs, installed extensions and editor commands
+have the server account's operating-system privileges. Use separate OS identities
+or containers and separate tokens for separate operators.
+
+### Filesystem and terminal reliability
+
+`fs_list` and `fs_search` return `skipped` entries and `truncated` alongside their
+existing data, so unreadable subtrees and broken links do not hide readable
+siblings. Listing uses each symlink's own metadata and does not traverse it.
+UTF-8 reads remove a leading BOM from content while retaining the byte hash for
+conflict detection; base64 retains the original bytes.
+
+Use `terminal_run` for one command and a bounded result: pass an executable in
+`command`, structured `args`, optional confined `cwd`/`env`, and `timeoutMs`.
+It returns separate UTF-8 stdout/stderr, exit status, timeout/cancellation and
+truncation flags. Shell syntax requires choosing the shell executable explicitly.
+`terminal_read` strips ANSI by default (`stripAnsi: false` returns raw output),
+and `terminal_write` preserves raw data unless `submit: true` adds Enter.
+`terminal_create` exposes observed-output readiness; this is not a guarantee
+that an arbitrary shell has displayed its prompt. No brittle prompt guessing is
+used. Prefer the one-shot command for unattended work.
+
+The old `/ui` facsimile renderer from issue #12 no longer exists. The current
+OpenVSCode bridge has bounded pending calls and output backpressure, times out
+requests, rejects them on disconnect/replacement, and never silently drops RPC
+calls. A timeout is an uncertain acknowledgement: an editor may already have
+applied an operation, so read current state before retrying a write.
+
 ## Configuration
 
 ### User-facing environment variables
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
+| `MCP_VSCODE_AUTH_TOKEN` | Unset | Required for HTTP mode: 32–256 printable non-space characters; prefer this environment variable to command-line secrets. Stdio-only launches generate an inaccessible companion API token unless one is explicitly configured. |
 | `MCP_VSCODE_WORKSPACE` | Process working directory | Absolute workspace root. Prefer setting this explicitly. `--workspace` takes precedence. |
 | `MCP_VSCODE_OPENVSCODE_ROOT` | Platform runtime package or bundled runtime | Override the OpenVSCode runtime directory. `--openvscode-root` takes precedence. |
 | `MCP_VSCODE_RENDER_MODE` | `default` | Set exactly `stream` to enable experimental genuine-workbench pixel streaming. `default`, empty, or unset uses iframe/browser behavior. Other values fail startup. |
@@ -185,8 +238,8 @@ The local gateway serves:
 | Route | Authentication/exposure | Purpose |
 | --- | --- | --- |
 | `GET /healthz` | Local deployment policy | Liveness and OpenVSCode/bridge state |
-| `GET /session.json` | `?token=` when `--auth-token` is configured | Debug-browser session payload |
-| `GET /app` | `?token=` when `--auth-token` is configured | Debug version of the MCP App document |
+| `GET /session.json` | Authorization bearer header | Debug-browser session payload; query tokens are rejected |
+| `GET /app` | Static login page; bearer header for session document | Debug workbench; token stays in browser memory and reload requires login |
 | `ALL /mcp` | `Authorization: Bearer` when configured | Streamable HTTP MCP transport |
 | `HTTP/WS /ide/<random>/...` | High-entropy per-process path; narrowly brokered in FLUJO | Proxied genuine OpenVSCode workbench, assets, APIs, and sockets |
 | `WS /bridge` | Authenticated bridge handshake | OpenVSCode bridge extension JSON-RPC channel; not brokered publicly by FLUJO |
@@ -216,7 +269,7 @@ The server exposes 27 tools across these groups:
 | Language services | `diagnostics_get` |
 | Commands | `vscode_list_commands`, `vscode_execute_command` |
 | Extensions | `extensions_list`, `extensions_install`, `extensions_uninstall` |
-| Terminals | `terminal_create`, `terminal_list`, `terminal_read`, `terminal_write`, `terminal_resize`, `terminal_kill` |
+| Terminals | `terminal_run`, `terminal_create`, `terminal_list`, `terminal_read`, `terminal_write`, `terminal_resize`, `terminal_kill` |
 | Git | `git_status`, `git_diff`, `git_run` |
 
 Editor, diagnostics, command, and extension tools always target the genuine OpenVSCode bridge. Destructive and open-world tools are annotated so compatible MCP hosts can apply their approval policy.
@@ -269,12 +322,11 @@ Calling `vscode_open` opens the MCP App. The **Fullscreen** button requests the 
   --port 8443 \
   --workspace /work/my-repository \
   --public-url https://editor.example.com:8443 \
-  --auth-token "$MCP_VSCODE_TOKEN" \
   --cert /run/secrets/tls.crt \
   --key /run/secrets/tls.key
 ```
 
-The MCP endpoint is `https://editor.example.com:8443/mcp`. Binding beyond loopback is rejected unless both TLS and a bearer token are configured. A TLS-terminating reverse proxy may instead front a loopback HTTP child, but its public URL and WebSocket routing must be correct.
+Set `MCP_VSCODE_AUTH_TOKEN` securely before launching and send it in the MCP client's `Authorization: Bearer <token>` header. The MCP endpoint is `https://editor.example.com:8443/mcp`. Binding beyond loopback is rejected unless both TLS and a bearer token are configured. A TLS-terminating reverse proxy may instead front a loopback HTTP child, but its public URL and WebSocket routing must be correct.
 
 ## MCP host requirements
 
@@ -296,6 +348,7 @@ npm run check
 Useful commands:
 
 ```bash
+export MCP_VSCODE_AUTH_TOKEN="$(openssl rand -hex 32)"
 npm run dev -- --http --port 3001 --workspace . --ide-url http://127.0.0.1:3999
 npm run dev:mock-ide -- --port 3999
 npm run runtime:fetch -- linux-x64
@@ -396,3 +449,31 @@ OpenVSCode Server and Code OSS are MIT-licensed upstream projects. MCP VS Code i
 ## License
 
 MIT. See [LICENSE](LICENSE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+### Repair acceptance gates
+
+`npm run test:protocol` launches the actual CLI in both protocol eras and checks
+file writes/reads, real one-shot commands, Apps resources, confinement/errors and
+EOF cleanup. CI repeats it against installed production and standalone artifacts.
+After `npm run runtime:fetch`, set `MCP_VSCODE_REAL_RUNTIME_ROOT` to the absolute
+`runtime/openvscode-server` directory for `npm run test:runtime`.
+`npx playwright install chromium && npm run test:browser` checks browser login
+and an opaque sandboxed MCP App embedding the real OpenVSCode workbench, including
+its live bridge. CI builds the pinned native Windows source and validates its
+actual packaged runtime; Linux downloads remain checksum verified.
+
+As checked on 2026-09-06, OpenVSCode 1.109.5 is still the latest upstream release.
+The runtime packaging replaces its bundled Node22.21.1 with official Node22.23.2
+security-release binaries, independently SHA256 verified for each platform while
+keeping the Node22 native-module ABI. The exact Node source/hash is recorded in
+`openvscode-runtime.json` and its license travels with the runtime.
+[Node22.23.2 security release](https://nodejs.org/en/blog/release/v22.23.2).
+Its availability is verified, but an end-of-2026 security guarantee requires
+tracking future upstream runtime/security releases. This PR does not publish or
+deploy a release, and a controlled Apps test host does not certify every vendor host.
+
+The genuine workbench needs cookies and origin storage. A host that removes `allow-same-origin` from its sandbox produces an opaque origin; the App now detects this and offers the real workbench in a browser instead of reporting a blank editor as embedded. Hosts may embed the App on a dedicated, isolated origin with storage enabled. The regression suite covers both host policies and the authenticated standalone login.
+
+On macOS, the install hook repairs the executable mode of the pinned native PTY spawn-helper if its package archive omitted that mode. Installs using `--ignore-scripts` must run `npm run postinstall` before using the native PTY backend.
+
+Workspace notifications use 250ms polling on Windows to avoid an observed Node24/libuv native watcher abort during rapid workspace teardown; other platforms use native watching. Watchers do not traverse symbolic links outside the workspace.

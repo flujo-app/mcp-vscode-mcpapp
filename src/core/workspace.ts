@@ -84,13 +84,19 @@ export class Workspace {
 
   async startWatching(): Promise<void> {
     if (this.#watcher) return;
-    this.#watcher = chokidar.watch(this.root, {
+    this.#watcher = chokidar.watch(this.#rootReal, {
+      // Native ReadDirectoryChangesW can abort Node24 in libuv during rapid teardown.
+      // Polling avoids that process-level failure and does not traverse external links.
+      usePolling: process.platform === "win32",
+      interval: 250,
+      binaryInterval: 500,
+      followSymlinks: false,
       ignoreInitial: true,
       // Unreadable subdirectories must never take the process down: chokidar
       // rethrows EACCES/EPERM as an unhandled `error` event otherwise.
       ignorePermissionErrors: true,
       ignored: (candidate) => {
-        const relative = path.relative(this.root, candidate);
+        const relative = path.relative(this.#rootReal, candidate);
         return relative
           .split(path.sep)
           .some((part) => DEFAULT_IGNORES.has(part));
@@ -99,7 +105,7 @@ export class Workspace {
     const emit = (kind: string, candidate: string) => {
       this.#events.emit("workspace.changed", {
         kind,
-        path: this.relative(candidate),
+        path: path.relative(this.#rootReal, candidate).split(path.sep).join("/") || ".",
       });
     };
     this.#watcher.on("add", (value) => emit("created", value));

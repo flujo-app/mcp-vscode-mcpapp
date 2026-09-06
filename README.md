@@ -475,3 +475,5 @@ deploy a release, and a controlled Apps test host does not certify every vendor 
 The genuine workbench needs cookies and origin storage. A host that removes `allow-same-origin` from its sandbox produces an opaque origin; the App now detects this and offers the real workbench in a browser instead of reporting a blank editor as embedded. Hosts may embed the App on a dedicated, isolated origin with storage enabled. The regression suite covers both host policies and the authenticated standalone login.
 
 On macOS, the install hook repairs the executable mode of the pinned native PTY spawn-helper if its package archive omitted that mode. Installs using `--ignore-scripts` must run `npm run postinstall` before using the native PTY backend.
+
+Workspace notifications use 250ms polling on Windows to avoid an observed Node24/libuv native watcher abort during rapid workspace teardown; other platforms use native watching. Watchers do not traverse symbolic links outside the workspace.

@@ -146,7 +146,7 @@ test("real default shell initialization executes submitted commands", async (t) 
       `printf '%s\\n' '${value}' > '${output.replaceAll("'", "'\\''")}'; cat '${output.replaceAll("'", "'\\''")}'`;
     manager.write(terminal.id,command,{submit:true});
     await until(()=>{try{return readFileSync(output,"utf8").replace(/^\uFEFF/,"").trim()===value;}catch{return false;}},shell+" executes a submitted Unicode command and writes its actual result");
-    assert.ok(manager.read(terminal.id).output.includes(value));
+    await until(() => manager.read(terminal.id).output.includes(value), "ConPTY delivers the executed command output after the file write");
     await manager.kill(terminal.id);
   }
 });

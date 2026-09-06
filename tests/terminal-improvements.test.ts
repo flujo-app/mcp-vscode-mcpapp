@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import {mkdtemp,rm} from "node:fs/promises";
+import {readFileSync} from "node:fs";
+import {join} from "node:path";
+import {tmpdir} from "node:os";
 import { CoreEvents } from "../src/core/events.js";
 import { TerminalManager } from "../src/core/terminal.js";
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -134,16 +138,15 @@ test("real default shell initialization executes submitted commands", async (t) 
       return;
     }
     assert.equal(terminal.backend, "pty");
-    manager.write(terminal.id, "echo MCP_SUBMIT_—_✓", { submit: true });
-    await until(
-      () =>
-        manager
-          .read(terminal.id)
-          .output.replaceAll("\r", "")
-          .split("\n")
-          .some((line) => line.trim() === "MCP_SUBMIT_—_✓"),
-      shell + " executes, rather than only echoing the input command",
-    );
+    const dir=await mkdtemp(join(tmpdir(),"vscode-shell-"));const output=join(dir,"unicode.txt");
+    t.after(()=>rm(dir,{recursive:true,force:true,maxRetries:5,retryDelay:100}));
+    const value="MCP_SUBMIT_—_✓";
+    const command=shell==="cmd.exe"?`echo ${value}>"${output}" & type "${output}"`:
+      shell==="powershell.exe"?`Set-Content -LiteralPath '${output.replaceAll("'","''")}' -Value '${value}' -Encoding utf8; Get-Content -LiteralPath '${output.replaceAll("'","''")}'`:
+      `printf '%s\\n' '${value}' > '${output.replaceAll("'", "'\\''")}'; cat '${output.replaceAll("'", "'\\''")}'`;
+    manager.write(terminal.id,command,{submit:true});
+    await until(()=>{try{return readFileSync(output,"utf8").replace(/^\uFEFF/,"").trim()===value;}catch{return false;}},shell+" executes a submitted Unicode command and writes its actual result");
+    assert.ok(manager.read(terminal.id).output.includes(value));
     await manager.kill(terminal.id);
   }
 });

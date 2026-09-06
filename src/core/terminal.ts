@@ -37,7 +37,7 @@ interface PtyModule {
       cols: number;
       rows: number;
       env: Record<string, string>;
-      encoding: string;
+      encoding?: string;
     },
   ): PtyLike;
 }
@@ -135,7 +135,7 @@ export class TerminalManager {
         cols: options.columns ?? 120,
         rows: options.rows ?? 30,
         env: { ...process.env, ...options.env } as Record<string, string>,
-        encoding: "utf8",
+        ...(process.platform === "win32" ? {} : { encoding: "utf8" }),
       });
       session = { ...base, pid: pty.pid, pty, disposables: [] };
       this.#sessions.set(id, session);

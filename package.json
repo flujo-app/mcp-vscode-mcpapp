@@ -30,7 +30,8 @@
     "README.md",
     "LICENSE",
     "NOTICE",
-    "THIRD_PARTY_NOTICES.md"
+    "THIRD_PARTY_NOTICES.md",
+    "scripts/prepare-native-pty.mjs"
   ],
   "scripts": {
     "build": "node scripts/build.mjs",
@@ -58,7 +59,8 @@
     "check": "npm run version:check && npm run typecheck && npm test && npm run build && npm run test:integration",
     "prepack": "npm run check && npm run npm:verify-runtime",
     "test:protocol": "node scripts/verify-protocol.mjs",
-    "test:browser": "playwright test"
+    "test:browser": "playwright test",
+    "postinstall": "node scripts/prepare-native-pty.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/node": "2.0.0",

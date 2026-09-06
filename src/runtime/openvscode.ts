@@ -6,11 +6,17 @@ import net from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { McpVscodeError } from "../core/errors.js";
+import { terminateOwnedProcess } from "../core/process.js";
 import type { VscodeCore } from "../core/core.js";
 
 const requireFromHere = createRequire(import.meta.url);
 
-export type OpenVscodeState = "stopped" | "starting" | "ready" | "unavailable" | "failed";
+export type OpenVscodeState =
+  | "stopped"
+  | "starting"
+  | "ready"
+  | "unavailable"
+  | "failed";
 
 export interface OpenVscodeStatus {
   state: OpenVscodeState;
@@ -30,7 +36,10 @@ export interface OpenVscodeLaunch {
 }
 
 /** Remove the random workbench route capability before a line reaches logs or diagnostics. */
-export function redactOpenVscodeLogLine(line: string, basePath: string): string {
+export function redactOpenVscodeLogLine(
+  line: string,
+  basePath: string,
+): string {
   return line.split(basePath).join("/ide/<app-only>");
 }
 
@@ -48,6 +57,7 @@ export class OpenVscodeRuntime {
   #launchPrefixArgs: string[] = [];
   #launchShell = false;
   #process?: ChildProcess;
+  #closing?: Promise<void>;
   #error?: string;
   #logs: string[] = [];
 
@@ -60,7 +70,8 @@ export class OpenVscodeRuntime {
   }) {
     this.#core = options.core;
     this.#workspaceRoot = options.workspaceRoot;
-    this.#stateRoot = options.stateRoot ?? path.join(options.workspaceRoot, ".mcp-vscode");
+    this.#stateRoot =
+      options.stateRoot ?? path.join(options.workspaceRoot, ".mcp-vscode");
     this.#configuredRoot = options.openVscodeRoot;
     this.#externalIdeUrl = options.externalIdeUrl;
   }
@@ -73,13 +84,17 @@ export class OpenVscodeRuntime {
     return this.#basePath;
   }
 
-  async start(options: { gatewayOrigin: string; bridgeUrl: string }): Promise<OpenVscodeStatus> {
+  async start(options: {
+    gatewayOrigin: string;
+    bridgeUrl: string;
+  }): Promise<OpenVscodeStatus> {
     if (this.#externalIdeUrl) {
       this.#state = "ready";
       this.#target = this.#externalIdeUrl;
       this.#browserUrl = `${options.gatewayOrigin}${this.#basePath}/`;
       return this.status();
     }
+    this.#closing = undefined;
     this.#state = "starting";
     this.#error = undefined;
     try {
@@ -127,11 +142,16 @@ export class OpenVscodeRuntime {
         MCP_VSCODE_BRIDGE_TOKEN: this.#core.bridgeToken,
       },
       windowsHide: true,
+      detached: process.platform !== "win32",
       shell: this.#launchShell,
       stdio: ["ignore", "pipe", "pipe"],
     });
-    this.#process.stdout?.on("data", (data: Buffer) => this.#log(data.toString("utf8")));
-    this.#process.stderr?.on("data", (data: Buffer) => this.#log(data.toString("utf8")));
+    this.#process.stdout?.on("data", (data: Buffer) =>
+      this.#log(data.toString("utf8")),
+    );
+    this.#process.stderr?.on("data", (data: Buffer) =>
+      this.#log(data.toString("utf8")),
+    );
     this.#process.once("exit", (code, signal) => {
       if (this.#state === "stopped") return;
       this.#state = "failed";
@@ -147,7 +167,9 @@ export class OpenVscodeRuntime {
     try {
       await waitForHttp(`${this.#target}${this.#basePath}/`, 30_000);
       this.#state = "ready";
-      this.#core.events.emit("openvscode.ready", { browserUrl: this.#browserUrl });
+      this.#core.events.emit("openvscode.ready", {
+        browserUrl: this.#browserUrl,
+      });
     } catch (error) {
       this.#state = "failed";
       this.#error = error instanceof Error ? error.message : String(error);
@@ -168,10 +190,16 @@ export class OpenVscodeRuntime {
     };
   }
 
-  close(): void {
+  close(): Promise<void> {
+    if (this.#closing) return this.#closing;
     this.#state = "stopped";
-    this.#process?.kill("SIGTERM");
+    const child = this.#process;
     this.#process = undefined;
+    return (this.#closing = child
+      ? terminateOwnedProcess(child, {
+          processGroup: process.platform !== "win32",
+        })
+      : Promise.resolve());
   }
 
   async #findLaunch(): Promise<OpenVscodeLaunch> {
@@ -216,10 +244,19 @@ export class OpenVscodeRuntime {
       }
     }
     if (!source) {
-      throw new McpVscodeError("Built VS Code bridge extension not found", "BRIDGE_EXTENSION_NOT_FOUND");
+      throw new McpVscodeError(
+        "Built VS Code bridge extension not found",
+        "BRIDGE_EXTENSION_NOT_FOUND",
+      );
     }
-    const workspaceHash = createHash("sha256").update(this.#workspaceRoot).digest("hex").slice(0, 8);
-    const destination = path.join(extensionsDir, `flujo.mcp-vscode-0.2.4-${workspaceHash}`); // x-release-please-version
+    const workspaceHash = createHash("sha256")
+      .update(this.#workspaceRoot)
+      .digest("hex")
+      .slice(0, 8);
+    const destination = path.join(
+      extensionsDir,
+      `flujo.mcp-vscode-0.2.4-${workspaceHash}`, // x-release-please-version
+    );
     await cp(source, destination, { recursive: true, force: true });
   }
 
@@ -237,7 +274,10 @@ export class OpenVscodeRuntime {
 }
 
 /** Name of the optional per-platform package that carries this host's OpenVSCode runtime. */
-export function platformRuntimePackage(platform = process.platform, arch = process.arch): string {
+export function platformRuntimePackage(
+  platform = process.platform,
+  arch = process.arch,
+): string {
   return `@mario.andreschak/mcp-vscode-${platform}-${arch}`;
 }
 
@@ -251,7 +291,9 @@ export function resolvePlatformRuntimeRoot(
   arch = process.arch,
 ): string | undefined {
   try {
-    const manifest = requireFromHere.resolve(`${platformRuntimePackage(platform, arch)}/package.json`);
+    const manifest = requireFromHere.resolve(
+      `${platformRuntimePackage(platform, arch)}/package.json`,
+    );
     return path.join(path.dirname(manifest), "runtime", "openvscode-server");
   } catch {
     return undefined;
@@ -269,17 +311,26 @@ export async function resolveOpenVscodeLaunch(
       if (await filesExist(node, serverMain)) {
         return { executable: node, prefixArgs: [serverMain], shell: false };
       }
-      for (const relative of ["bin/openvscode-server.cmd", "bin/openvscode-server.bat", "bin/openvscode-server"]) {
+      for (const relative of [
+        "bin/openvscode-server.cmd",
+        "bin/openvscode-server.bat",
+        "bin/openvscode-server",
+      ]) {
         const executable = path.join(root, ...relative.split("/"));
         if (await filesExist(executable)) {
-          return { executable, prefixArgs: [], shell: /\.(cmd|bat)$/i.test(executable) };
+          return {
+            executable,
+            prefixArgs: [],
+            shell: /\.(cmd|bat)$/i.test(executable),
+          };
         }
       }
       continue;
     }
 
     const executable = path.join(root, "bin", "openvscode-server");
-    if (await filesExist(executable)) return { executable, prefixArgs: [], shell: false };
+    if (await filesExist(executable))
+      return { executable, prefixArgs: [], shell: false };
   }
   return undefined;
 }
@@ -314,8 +365,14 @@ async function waitForHttp(url: string, timeoutMs: number): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     try {
-      const response = await fetch(url, { redirect: "manual" });
-      if (response.status < 500) return;
+      const response = await fetch(url, {
+        redirect: "manual",
+        signal: AbortSignal.timeout(
+          Math.max(1, Math.min(2000, deadline - Date.now())),
+        ),
+      });
+      await response.body?.cancel();
+      if (response.status >= 200 && response.status < 400) return;
     } catch {
       // Startup races are expected.
     }

@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
+import { Worker } from "node:worker_threads";
 import {
+  lstat,
   mkdir,
   readFile,
   readdir,
@@ -17,13 +19,47 @@ import { McpVscodeError } from "./errors.js";
 // `lost+found` exists at the root of every ext4 volume and is root-owned 0700.
 // When the workspace root is a mounted volume, descending into it raises EACCES
 // for any non-root process, so it is skipped alongside the usual noise.
-const DEFAULT_IGNORES = new Set([".git", "node_modules", ".mcp-vscode", "lost+found"]);
+const DEFAULT_IGNORES = new Set([
+  ".git",
+  "node_modules",
+  ".mcp-vscode",
+  "lost+found",
+]);
 
 export interface WorkspaceEntry {
   path: string;
   type: "file" | "directory" | "symlink" | "other";
-  size: number;
-  modifiedAt: string;
+  size?: number;
+  modifiedAt?: string;
+  error?: string;
+}
+export interface WorkspaceSkipped {
+  path: string;
+  operation: "metadata" | "list" | "read";
+  code: string;
+}
+export interface WorkspaceListing {
+  entries: WorkspaceEntry[];
+  skipped: WorkspaceSkipped[];
+  truncated: boolean;
+}
+export interface WorkspaceMatch {
+  path: string;
+  line: number;
+  column: number;
+  preview: string;
+}
+export interface WorkspaceSearchOptions {
+  query: string;
+  path?: string;
+  regex?: boolean;
+  caseSensitive?: boolean;
+  maxResults?: number;
+}
+export interface WorkspaceSearchResult {
+  matches: WorkspaceMatch[];
+  skipped: WorkspaceSkipped[];
+  truncated: boolean;
 }
 
 export class Workspace {
@@ -31,7 +67,10 @@ export class Workspace {
   readonly #events: CoreEvents;
   #rootReal = "";
   #watcher?: FSWatcher;
-  readonly #overlays = new Map<string, { content: string; dirty: boolean; documentVersion: number }>();
+  readonly #overlays = new Map<
+    string,
+    { content: string; dirty: boolean; documentVersion: number }
+  >();
 
   constructor(root: string, events: CoreEvents) {
     this.root = path.resolve(root);
@@ -52,7 +91,9 @@ export class Workspace {
       ignorePermissionErrors: true,
       ignored: (candidate) => {
         const relative = path.relative(this.root, candidate);
-        return relative.split(path.sep).some((part) => DEFAULT_IGNORES.has(part));
+        return relative
+          .split(path.sep)
+          .some((part) => DEFAULT_IGNORES.has(part));
       },
     });
     const emit = (kind: string, candidate: string) => {
@@ -84,7 +125,9 @@ export class Workspace {
   }
 
   relative(absolutePath: string): string {
-    return path.relative(this.root, absolutePath).split(path.sep).join("/") || ".";
+    return (
+      path.relative(this.root, absolutePath).split(path.sep).join("/") || "."
+    );
   }
 
   async resolve(userPath = ".", allowMissing = false): Promise<string> {
@@ -107,49 +150,135 @@ export class Workspace {
           this.#assertReallyInside(actualParent);
           return candidate;
         } catch (parentError) {
-          if ((parentError as NodeJS.ErrnoException).code !== "ENOENT") throw parentError;
+          if ((parentError as NodeJS.ErrnoException).code !== "ENOENT")
+            throw parentError;
           parent = path.dirname(parent);
         }
       }
-      throw new McpVscodeError("Unable to resolve a safe parent directory", "INVALID_PATH");
+      throw new McpVscodeError(
+        "Unable to resolve a safe parent directory",
+        "INVALID_PATH",
+      );
     }
   }
 
-  async list(userPath = ".", recursive = false, maxEntries = 2_000): Promise<WorkspaceEntry[]> {
+  async list(
+    userPath = ".",
+    recursive = false,
+    maxEntries = 2_000,
+  ): Promise<WorkspaceEntry[]> {
+    return (await this.listDetailed(userPath, recursive, maxEntries)).entries;
+  }
+
+  async listDetailed(
+    userPath = ".",
+    recursive = false,
+    maxEntries = 2_000,
+  ): Promise<WorkspaceListing> {
+    if (!Number.isInteger(maxEntries) || maxEntries < 1 || maxEntries > 20_000)
+      throw new McpVscodeError("Invalid listing limit", "INVALID_LIST_LIMIT");
     const start = await this.resolve(userPath);
-    const result: WorkspaceEntry[] = [];
+    const result: WorkspaceListing = {
+      entries: [],
+      skipped: [],
+      truncated: false,
+    };
+    const recoverable = new Set([
+      "ENOENT",
+      "EACCES",
+      "EPERM",
+      "ELOOP",
+      "ENOTDIR",
+      "PATH_OUTSIDE_WORKSPACE",
+    ]);
+    const skip = (
+      absolute: string,
+      operation: WorkspaceSkipped["operation"],
+      error: unknown,
+    ): void => {
+      const code = (error as NodeJS.ErrnoException).code ?? "READ_FAILED";
+      if (!recoverable.has(code)) throw error;
+      result.skipped.push({ path: this.relative(absolute), operation, code });
+    };
     const visit = async (directory: string): Promise<void> => {
-      const entries = await readdir(directory, { withFileTypes: true });
+      let entries;
+      try {
+        // Recheck the confined path before descending; a directory may have changed since lstat.
+        if (directory !== start && (await lstat(directory)).isSymbolicLink()) {
+          result.skipped.push({
+            path: this.relative(directory),
+            operation: "list",
+            code: "SYMLINK_NOT_FOLLOWED",
+          });
+          return;
+        }
+        await this.resolve(this.relative(directory));
+        entries = await readdir(directory, { withFileTypes: true });
+      } catch (error) {
+        skip(directory, "list", error);
+        return;
+      }
       entries.sort((a, b) => a.name.localeCompare(b.name));
       for (const entry of entries) {
         if (DEFAULT_IGNORES.has(entry.name)) continue;
-        if (result.length >= maxEntries) return;
+        if (result.entries.length >= maxEntries) {
+          result.truncated = true;
+          if (!result.skipped.some((item) => item.code === "MAX_ENTRIES"))
+            result.skipped.push({
+              path: this.relative(directory),
+              operation: "list",
+              code: "MAX_ENTRIES",
+            });
+          return;
+        }
         const absolute = path.join(directory, entry.name);
-        const info = await stat(absolute);
-        result.push({
+        let info;
+        try {
+          info = await lstat(absolute);
+        } catch (error) {
+          skip(absolute, "metadata", error);
+          result.entries.push({
+            path: this.relative(absolute),
+            type: entry.isSymbolicLink()
+              ? "symlink"
+              : entry.isDirectory()
+                ? "directory"
+                : entry.isFile()
+                  ? "file"
+                  : "other",
+            error: (error as NodeJS.ErrnoException).code ?? "READ_FAILED",
+          });
+          continue;
+        }
+        result.entries.push({
           path: this.relative(absolute),
-          type: entry.isFile()
-            ? "file"
-            : entry.isDirectory()
+          type: info.isSymbolicLink()
+            ? "symlink"
+            : info.isDirectory()
               ? "directory"
-              : entry.isSymbolicLink()
-                ? "symlink"
+              : info.isFile()
+                ? "file"
                 : "other",
           size: info.size,
           modifiedAt: info.mtime.toISOString(),
         });
-        if (recursive && entry.isDirectory()) await visit(absolute);
+        if (recursive && info.isDirectory()) await visit(absolute);
       }
     };
     const info = await stat(start);
-    if (!info.isDirectory()) {
-      throw new McpVscodeError(`${userPath} is not a directory`, "NOT_A_DIRECTORY");
-    }
+    if (!info.isDirectory())
+      throw new McpVscodeError(
+        `${userPath} is not a directory`,
+        "NOT_A_DIRECTORY",
+      );
     await visit(start);
     return result;
   }
 
-  async read(userPath: string, encoding: "utf8" | "base64" = "utf8"): Promise<{
+  async read(
+    userPath: string,
+    encoding: "utf8" | "base64" = "utf8",
+  ): Promise<{
     path: string;
     content: string;
     encoding: "utf8" | "base64";
@@ -163,7 +292,7 @@ export class Workspace {
       const data = Buffer.from(overlay.content, "utf8");
       return {
         path: relativePath,
-        content: overlay.content,
+        content: overlay.content.replace(/^\uFEFF/, ""),
         encoding,
         size: data.length,
         version: createHash("sha256").update(data).digest("hex"),
@@ -172,7 +301,10 @@ export class Workspace {
     const data = await readFile(absolute);
     return {
       path: relativePath,
-      content: data.toString(encoding),
+      content:
+        encoding === "utf8"
+          ? data.toString("utf8").replace(/^\uFEFF/, "")
+          : data.toString("base64"),
       encoding,
       size: data.length,
       version: createHash("sha256").update(data).digest("hex"),
@@ -239,14 +371,23 @@ export class Workspace {
     return { path: this.relative(absolute), size: data.length, version };
   }
 
-  async delete(userPath: string, recursive = false): Promise<{ path: string; deleted: true }> {
+  async delete(
+    userPath: string,
+    recursive = false,
+  ): Promise<{ path: string; deleted: true }> {
     const absolute = await this.resolve(userPath);
     if (absolute === this.root) {
-      throw new McpVscodeError("Refusing to delete the workspace root", "ROOT_DELETE_FORBIDDEN");
+      throw new McpVscodeError(
+        "Refusing to delete the workspace root",
+        "ROOT_DELETE_FORBIDDEN",
+      );
     }
     const info = await stat(absolute);
     if (info.isDirectory() && !recursive) {
-      throw new McpVscodeError("Directory deletion requires recursive=true", "RECURSIVE_REQUIRED");
+      throw new McpVscodeError(
+        "Directory deletion requires recursive=true",
+        "RECURSIVE_REQUIRED",
+      );
     }
     await rm(absolute, { recursive, force: false });
     this.#events.emit("workspace.deleted", { path: this.relative(absolute) });
@@ -258,62 +399,204 @@ export class Workspace {
     const destination = await this.resolve(to, true);
     await mkdir(path.dirname(destination), { recursive: true });
     await rename(source, destination);
-    const result = { from: this.relative(source), to: this.relative(destination) };
+    const result = {
+      from: this.relative(source),
+      to: this.relative(destination),
+    };
     this.#events.emit("workspace.moved", result);
     return result;
   }
 
-  async search(options: {
-    query: string;
-    path?: string;
-    regex?: boolean;
-    caseSensitive?: boolean;
-    maxResults?: number;
-  }): Promise<Array<{ path: string; line: number; column: number; preview: string }>> {
+  async search(options: WorkspaceSearchOptions): Promise<WorkspaceMatch[]> {
+    return (await this.searchDetailed(options)).matches;
+  }
+
+  async searchDetailed(
+    options: WorkspaceSearchOptions,
+  ): Promise<WorkspaceSearchResult> {
     const maxResults = Math.min(options.maxResults ?? 200, 2_000);
-    const files = await this.list(options.path ?? ".", true, 20_000);
+    if (!Number.isInteger(maxResults) || maxResults < 1)
+      throw new McpVscodeError("Invalid search limit", "INVALID_SEARCH_LIMIT");
+    const files = await this.listDetailed(options.path ?? ".", true, 20_000);
     const flags = options.caseSensitive ? "g" : "gi";
     const expression = options.regex
-      ? new RegExp(options.query, flags)
+      ? undefined
       : new RegExp(options.query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), flags);
-    const results: Array<{ path: string; line: number; column: number; preview: string }> = [];
-    for (const entry of files) {
-      if (entry.type !== "file" || entry.size > 2_000_000) continue;
-      let content: string;
-      try {
-        content = (await this.read(entry.path)).content;
-      } catch {
-        continue;
+    const matcher = options.regex
+      ? regexMatcher(options.query, flags)
+      : undefined;
+    try {
+      if (matcher) await matcher.match("", 0);
+      const result: WorkspaceSearchResult = {
+        matches: [],
+        skipped: [...files.skipped],
+        truncated: files.truncated,
+      };
+      for (const entry of files.entries) {
+        if (entry.type !== "file" || entry.error) continue;
+        if ((entry.size ?? 0) > 2_000_000) {
+          result.skipped.push({
+            path: entry.path,
+            operation: "read",
+            code: "FILE_TOO_LARGE",
+          });
+          continue;
+        }
+        let content: string;
+        try {
+          content = (await this.read(entry.path)).content;
+        } catch (error) {
+          result.skipped.push({
+            path: entry.path,
+            operation: "read",
+            code: (error as NodeJS.ErrnoException).code ?? "READ_FAILED",
+          });
+          continue;
+        }
+        if (matcher) {
+          const batch = await matcher.match(
+            content,
+            maxResults - result.matches.length,
+          );
+          result.matches.push(
+            ...batch.matches.map((match) => ({ ...match, path: entry.path })),
+          );
+          if (batch.truncated) {
+            result.truncated = true;
+            return result;
+          }
+          continue;
+        }
+        const lines = content.split(/\r?\n/);
+        for (let index = 0; index < lines.length; index++) {
+          const line = lines[index] ?? "";
+          expression!.lastIndex = 0;
+          const match = expression!.exec(line);
+          if (!match) continue;
+          if (result.matches.length >= maxResults) {
+            result.truncated = true;
+            return result;
+          }
+          result.matches.push({
+            path: entry.path,
+            line: index + 1,
+            column: match.index + 1,
+            preview: line.slice(0, 500),
+          });
+        }
       }
-      const lines = content.split(/\r?\n/);
-      for (let index = 0; index < lines.length; index += 1) {
-        const line = lines[index] ?? "";
-        expression.lastIndex = 0;
-        const match = expression.exec(line);
-        if (!match) continue;
-        results.push({
-          path: entry.path,
-          line: index + 1,
-          column: match.index + 1,
-          preview: line.slice(0, 500),
-        });
-        if (results.length >= maxResults) return results;
-      }
+      return result;
+    } finally {
+      await matcher?.close();
     }
-    return results;
   }
 
   #assertLexicallyInside(candidate: string): void {
     const relative = path.relative(this.root, candidate);
-    if (relative.startsWith("..") || path.isAbsolute(relative)) {
-      throw new McpVscodeError("Path escapes the workspace root", "PATH_OUTSIDE_WORKSPACE");
+    if (
+      relative === ".." ||
+      relative.startsWith(".." + path.sep) ||
+      path.isAbsolute(relative)
+    ) {
+      throw new McpVscodeError(
+        "Path escapes the workspace root",
+        "PATH_OUTSIDE_WORKSPACE",
+      );
     }
   }
 
   #assertReallyInside(candidate: string): void {
     const relative = path.relative(this.#rootReal, candidate);
-    if (relative.startsWith("..") || path.isAbsolute(relative)) {
-      throw new McpVscodeError("Resolved path escapes the workspace root", "PATH_OUTSIDE_WORKSPACE");
+    if (
+      relative === ".." ||
+      relative.startsWith(".." + path.sep) ||
+      path.isAbsolute(relative)
+    ) {
+      throw new McpVscodeError(
+        "Resolved path escapes the workspace root",
+        "PATH_OUTSIDE_WORKSPACE",
+      );
     }
   }
+}
+
+const REGEX_WORKER = `
+const { parentPort, workerData } = require("node:worker_threads");
+let expression;
+try { expression = new RegExp(workerData.query, workerData.flags); }
+catch { parentPort.postMessage({ error: "INVALID_SEARCH_REGEX" }); }
+parentPort.on("message", ({ content, maxResults }) => {
+  if (!expression) return;
+  const matches = [];
+  const lines = content.split(/\\r?\\n/);
+  for (let index = 0; index < lines.length; index++) {
+    expression.lastIndex = 0;
+    const match = expression.exec(lines[index]);
+    if (!match) continue;
+    if (matches.length >= maxResults) { parentPort.postMessage({ matches, truncated: true }); return; }
+    matches.push({ line: index + 1, column: match.index + 1, preview: lines[index].slice(0, 500) });
+  }
+  parentPort.postMessage({ matches, truncated: false });
+});
+`;
+
+function regexMatcher(query: string, flags: string) {
+  const worker = new Worker(REGEX_WORKER, {
+    eval: true,
+    workerData: { query, flags },
+    resourceLimits: { maxOldGenerationSizeMb: 64, stackSizeMb: 2 },
+  });
+  const deadline = Date.now() + 10_000;
+  type Batch = {
+    matches: Array<Omit<WorkspaceMatch, "path">>;
+    truncated: boolean;
+  };
+  let pending:
+    | { resolve(value: Batch): void; reject(error: unknown): void }
+    | undefined;
+  let failure: McpVscodeError | undefined;
+  const fail = (code: string) => {
+    failure = new McpVscodeError(
+      code === "INVALID_SEARCH_REGEX"
+        ? "Invalid search regular expression"
+        : "Regular expression search exceeded its execution or memory limit",
+      code,
+    );
+    pending?.reject(failure);
+  };
+  worker.on("error", () => fail("SEARCH_REGEX_LIMIT"));
+  worker.on("exit", (code) => {
+    if (code && pending) fail("SEARCH_REGEX_LIMIT");
+  });
+  worker.on("message", (message: Batch & { error?: string }) => {
+    if (message.error) fail(message.error);
+    else pending?.resolve(message);
+  });
+  return {
+    async match(content: string, maxResults: number): Promise<Batch> {
+      if (failure) throw failure;
+      const remaining = Math.min(1000, deadline - Date.now());
+      if (remaining <= 0) {
+        fail("SEARCH_REGEX_LIMIT");
+        throw failure;
+      }
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        return await new Promise<Batch>((resolve, reject) => {
+          pending = { resolve, reject };
+          timer = setTimeout(() => {
+            fail("SEARCH_REGEX_LIMIT");
+            void worker.terminate();
+          }, remaining);
+          worker.postMessage({ content, maxResults });
+        });
+      } finally {
+        clearTimeout(timer);
+        pending = undefined;
+      }
+    },
+    async close() {
+      await worker.terminate();
+    },
+  };
 }

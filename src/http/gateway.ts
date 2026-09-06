@@ -1,10 +1,12 @@
-import { timingSafeEqual } from "node:crypto";
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import http, { type Server as HttpServer } from "node:http";
 import https from "node:https";
 import type { AddressInfo } from "node:net";
-import { createMcpExpressApp } from "@modelcontextprotocol/sdk/server/express.js";
-import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import express from "express";
+import { createMcpHandler } from "@modelcontextprotocol/server";
+import { toNodeHandler } from "@modelcontextprotocol/node";
+import { loginPage } from "./login.js";
 import httpProxy from "http-proxy";
 import type { Request, Response, NextFunction } from "express";
 import type { VscodeCore } from "../core/core.js";
@@ -50,20 +52,52 @@ export interface GatewayOptions {
 
 export class Gateway {
   readonly #options: GatewayOptions;
-  readonly #proxy = httpProxy.createProxyServer({ ws: true, xfwd: true, changeOrigin: false });
+  readonly #proxy = httpProxy.createProxyServer({
+    ws: true,
+    xfwd: true,
+    changeOrigin: false,
+  });
   readonly #stream: WorkbenchStreamController;
   #server?: HttpServer;
   #origin = "";
   #runtimeProofToken?: string;
+  #mcp?: ReturnType<typeof createMcpHandler>;
 
   constructor(options: GatewayOptions) {
-    this.#options = options;
+    if (
+      options.authToken !== undefined &&
+      !/^[\x21-\x7e]{32,256}$/.test(options.authToken)
+    )
+      throw new Error(
+        "HTTP token must contain 32–256 printable non-space characters",
+      );
+    // Stdio-only launches do not expose an unauthenticated companion MCP/debug API.
+    this.#options = {
+      ...options,
+      authToken: options.authToken ?? randomBytes(32).toString("hex"),
+    };
+    if (options.publicUrl) {
+      const u = new URL(options.publicUrl);
+      if (
+        !["http:", "https:"].includes(u.protocol) ||
+        u.username ||
+        u.password ||
+        u.pathname !== "/" ||
+        u.search ||
+        u.hash
+      )
+        throw new Error("publicUrl must be an HTTP(S) origin");
+    }
     this.#runtimeProofToken = options.runtimeBroker?.registration.token;
     this.#stream = new WorkbenchStreamController({
       enabled: options.stream?.enabled ?? false,
       runtime: options.runtime,
-      ...(options.stream?.browserExecutable ? { browserExecutable: options.stream.browserExecutable } : {}),
-      ...(options.stream?.noSandbox !== undefined ? { noSandbox: options.stream.noSandbox } : {}),
+      ...(options.stream?.browserExecutable
+        ? { browserExecutable: options.stream.browserExecutable }
+        : {}),
+      ...(options.stream?.noSandbox !== undefined
+        ? { noSandbox: options.stream.noSandbox }
+        : {}),
     });
     this.#proxy.on("proxyReq", (proxyRequest, request) => {
       if (isMaybeHtmlDocumentRequest(request.method, request.headers.accept)) {
@@ -76,17 +110,23 @@ export class Gateway {
       delete proxyResponse.headers["x-frame-options"];
       proxyResponse.headers["referrer-policy"] = "no-referrer";
       // The IDE is embedded in a sandboxed (opaque-origin) MCP-app iframe, so the
-      // workbench's `<script type="module">` and fetch() calls arrive with
-      // `Origin: null` and are CORS-checked. The gateway binds to loopback and
-      // access is already gated by the unguessable base path (+ optional auth
-      // token), so reflecting a wildcard here does not widen exposure.
-      proxyResponse.headers["access-control-allow-origin"] = "*";
+      // workbench's module/fetch requests can arrive with Origin: null.
+      // The explicit access gate admits that origin only for this unguessable
+      // IDE capability, never for MCP, debug/session APIs or the bridge.
+      if (request.headers.origin)
+        proxyResponse.headers["access-control-allow-origin"] =
+          request.headers.origin;
+      else delete proxyResponse.headers["access-control-allow-origin"];
+      proxyResponse.headers.vary = "Origin";
       proxyResponse.headers["cross-origin-resource-policy"] = "cross-origin";
       const csp = proxyResponse.headers["content-security-policy"];
       if (typeof csp === "string") {
         proxyResponse.headers["content-security-policy"] = csp
           .split(";")
-          .filter((directive) => !directive.trim().toLowerCase().startsWith("frame-ancestors"))
+          .filter(
+            (directive) =>
+              !directive.trim().toLowerCase().startsWith("frame-ancestors"),
+          )
           .join(";");
       }
 
@@ -99,16 +139,22 @@ export class Gateway {
         // We asked for manual control (selfHandleResponse) in case this turned
         // out to be the workbench document, but it wasn't one: replicate the
         // default pass-through ourselves, unmodified.
-        response.writeHead(proxyResponse.statusCode ?? 200, proxyResponse.headers);
+        response.writeHead(
+          proxyResponse.statusCode ?? 200,
+          proxyResponse.headers,
+        );
         proxyResponse.pipe(response as unknown as NodeJS.WritableStream);
         return;
       }
-      bufferAndInjectHtmlResponse(proxyResponse, response as unknown as Response);
+      bufferAndInjectHtmlResponse(
+        proxyResponse,
+        response as unknown as Response,
+      );
     });
     this.#proxy.on("error", (error, _request, response) => {
       if (response && "writeHead" in response && !response.headersSent) {
         response.writeHead(503, { "content-type": "application/json" });
-        response.end(JSON.stringify({ error: "OpenVSCode proxy unavailable", message: error.message }));
+        response.end(JSON.stringify({ error: "OpenVSCode proxy unavailable" }));
       }
     });
   }
@@ -120,11 +166,24 @@ export class Gateway {
   get localBridgeUrl(): string {
     if (!this.#server) throw new Error("Gateway has not started");
     const address = this.#server.address() as AddressInfo;
-    return `ws://127.0.0.1:${address.port}/bridge`;
+    return `${this.#options.tls ? "wss" : "ws"}://127.0.0.1:${address.port}/bridge`;
   }
 
   async start(): Promise<{ origin: string; port: number }> {
-    const app = createMcpExpressApp({ host: this.#options.host });
+    const app = express();
+    app.use((request, response, next) => {
+      response.setHeader("cache-control", "no-store");
+      response.setHeader("referrer-policy", "no-referrer");
+      response.setHeader("x-content-type-options", "nosniff");
+      const status = this.#accessStatus(request);
+      if (status) {
+        response
+          .status(status)
+          .json({ error: status === 421 ? "Invalid Host" : "Invalid Origin" });
+        return;
+      }
+      next();
+    });
     app.disable("x-powered-by");
 
     // This loopback-only proof is reachable while FLUJO performs the one-use
@@ -137,7 +196,10 @@ export class Gateway {
         return;
       }
       try {
-        response.setHeader(FLUJO_RUNTIME_PROOF_HEADER, runtimeBrokerProof(token, challenge));
+        response.setHeader(
+          FLUJO_RUNTIME_PROOF_HEADER,
+          runtimeBrokerProof(token, challenge),
+        );
         response.setHeader("cache-control", "no-store");
         response.status(204).end();
       } catch {
@@ -154,49 +216,96 @@ export class Gateway {
       });
     });
 
-    app.get("/session.json", this.#browserAuth.bind(this), (_request, response) => {
-      // The standalone debug page is same-origin. Do not make this endpoint
-      // cross-origin readable: in stream mode its app-only payload contains
-      // the authenticated viewer URL.
-      response.setHeader("cache-control", "no-store");
-      response.setHeader("x-content-type-options", "nosniff");
-      response.json(this.#sessionPayload());
-    });
-
-    app.get("/app", this.#browserAuth.bind(this), async (_request, response, next) => {
-      try {
-        const html = await readFile(this.#options.appHtmlPath, "utf8");
-        const debug = `<script>window.__MCP_VSCODE_DEBUG__=${escapeInlineJson(this.#sessionPayload())}</script>`;
+    app.get(
+      "/session.json",
+      this.#browserAuth.bind(this),
+      (_request, response) => {
+        // The standalone debug page is same-origin. Do not make this endpoint
+        // cross-origin readable: in stream mode its app-only payload contains
+        // the authenticated viewer URL.
         response.setHeader("cache-control", "no-store");
         response.setHeader("x-content-type-options", "nosniff");
-        response.setHeader("referrer-policy", "no-referrer");
-        response.type("html").send(html.replace("</head>", `${debug}</head>`));
-      } catch (error) {
-        next(error);
-      }
-    });
+        response.json(this.#sessionPayload());
+      },
+    );
 
-    app.all("/mcp", this.#bearerAuth.bind(this), async (request, response) => {
-      const mcpServer = createMcpServer(this.#mcpContext());
-      const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
-      response.on("close", () => {
-        transport.close().catch(() => undefined);
-        mcpServer.close().catch(() => undefined);
-      });
-      try {
-        await mcpServer.connect(transport);
-        await transport.handleRequest(request, response, request.body);
-      } catch (error) {
-        process.stderr.write(`[mcp] ${error instanceof Error ? error.stack : String(error)}\n`);
-        if (!response.headersSent) {
-          response.status(500).json({
-            jsonrpc: "2.0",
-            error: { code: -32603, message: "Internal server error" },
-            id: null,
-          });
+    app.get(
+      "/app",
+      this.#browserAuth.bind(this),
+      async (_request, response, next) => {
+        try {
+          const html = await readFile(this.#options.appHtmlPath, "utf8");
+          const debug = `<script>window.__MCP_VSCODE_DEBUG__=${escapeInlineJson(this.#sessionPayload())}</script>`;
+          response.setHeader("cache-control", "no-store");
+          response.setHeader("x-content-type-options", "nosniff");
+          response.setHeader("referrer-policy", "no-referrer");
+          response
+            .type("html")
+            .send(html.replace("</head>", `${debug}</head>`));
+        } catch (error) {
+          next(error);
         }
-      }
+      },
+    );
+
+    this.#mcp = createMcpHandler(() => createMcpServer(this.#mcpContext()), {
+      legacy: "stateless",
     });
+    const handleMcp = toNodeHandler(this.#mcp);
+    app.options("/mcp", (request, response) => {
+      if (request.headers.origin) {
+        response.setHeader(
+          "access-control-allow-origin",
+          request.headers.origin,
+        );
+        response.setHeader("vary", "Origin");
+      }
+      response.setHeader("access-control-allow-methods", "POST, OPTIONS");
+      response.setHeader(
+        "access-control-allow-headers",
+        "Authorization, Content-Type, Accept, MCP-Protocol-Version, Mcp-Method, Mcp-Name, Mcp-Session-Id",
+      );
+      response.status(204).end();
+    });
+    app.all(
+      "/mcp",
+      this.#bearerAuth.bind(this),
+      express.json({ limit: "8mb" }),
+      async (request, response) => {
+        if (request.headers.origin) {
+          response.setHeader(
+            "access-control-allow-origin",
+            request.headers.origin,
+          );
+          response.setHeader("vary", "Origin");
+        }
+        if (request.method === "POST" && !request.is("application/json")) {
+          response.status(415).json({ error: "Expected application/json" });
+          return;
+        }
+        try {
+          await handleMcp(request, response, request.body);
+        } catch {
+          if (!response.headersSent)
+            response.status(500).json({ error: "Internal server error" });
+        }
+      },
+    );
+    app.use(
+      (
+        error: { status?: number },
+        _request: Request,
+        response: Response,
+        _next: NextFunction,
+      ) => {
+        response
+          .status(error.status === 413 ? 413 : 400)
+          .json({
+            error:
+              error.status === 413 ? "Request body too large" : "Invalid JSON",
+          });
+      },
+    );
 
     app.use((request, response, next) => {
       if (!request.path.startsWith(this.#options.runtime.basePath)) {
@@ -206,9 +315,20 @@ export class Gateway {
       // Answer CORS preflights locally: the opaque-origin workbench iframe
       // preflights any fetch that carries custom headers, and OpenVSCode
       // itself does not speak CORS.
-      if (request.method === "OPTIONS" && request.headers["access-control-request-method"]) {
-        response.setHeader("access-control-allow-origin", "*");
-        response.setHeader("access-control-allow-methods", "GET,HEAD,POST,PUT,PATCH,DELETE,OPTIONS");
+      if (
+        request.method === "OPTIONS" &&
+        request.headers["access-control-request-method"]
+      ) {
+        if (request.headers.origin)
+          response.setHeader(
+            "access-control-allow-origin",
+            request.headers.origin,
+          );
+        response.setHeader("vary", "Origin");
+        response.setHeader(
+          "access-control-allow-methods",
+          "GET,HEAD,POST,PUT,PATCH,DELETE,OPTIONS",
+        );
         response.setHeader(
           "access-control-allow-headers",
           typeof request.headers["access-control-request-headers"] === "string"
@@ -245,7 +365,14 @@ export class Gateway {
         )
       : http.createServer(app);
     this.#server = nodeServer;
+    nodeServer.requestTimeout = 30000;
+    nodeServer.headersTimeout = 15000;
     nodeServer.on("upgrade", (request, socket, head) => {
+      const denied = this.#accessStatus(request);
+      if (denied) {
+        socket.end(`HTTP/1.1 ${denied} Forbidden\r\nConnection: close\r\n\r\n`);
+        return;
+      }
       const pathname = new URL(request.url ?? "/", "http://localhost").pathname;
       if (pathname === "/bridge") {
         this.#options.core.bridge.handleUpgrade(request, socket, head);
@@ -266,16 +393,21 @@ export class Gateway {
 
     await new Promise<void>((resolve, reject) => {
       nodeServer.once("error", reject);
-      nodeServer.listen(this.#options.port, this.#options.host, () => resolve());
+      nodeServer.listen(this.#options.port, this.#options.host, () =>
+        resolve(),
+      );
     });
     const address = nodeServer.address() as AddressInfo;
     const scheme = this.#options.tls ? "https" : "http";
     const localDisplayOrigin = `${scheme}://${loopbackDisplayHost(this.#options.host)}:${address.port}`;
-    this.#origin = this.#options.publicUrl?.replace(/\/$/, "") ?? localDisplayOrigin;
+    this.#origin =
+      this.#options.publicUrl?.replace(/\/$/, "") ?? localDisplayOrigin;
     try {
       if (!this.#options.publicUrl && this.#options.runtimeBroker) {
         if (this.#options.tls) {
-          throw new Error("FLUJO's private runtime broker requires the child gateway to use loopback HTTP");
+          throw new Error(
+            "FLUJO's private runtime broker requires the child gateway to use loopback HTTP",
+          );
         }
         const registration = await registerRuntimeWithBroker({
           broker: this.#options.runtimeBroker.registration,
@@ -285,7 +417,15 @@ export class Gateway {
             {
               path: this.#options.runtime.basePath,
               match: "prefix",
-              httpMethods: ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+              httpMethods: [
+                "GET",
+                "HEAD",
+                "POST",
+                "PUT",
+                "PATCH",
+                "DELETE",
+                "OPTIONS",
+              ],
               websocket: true,
             },
             ...(this.#stream.enabled
@@ -314,17 +454,24 @@ export class Gateway {
   }
 
   async close(): Promise<void> {
+    await this.#mcp?.close();
     await this.#stream.close();
     this.#proxy.close();
     if (!this.#server) return;
     await new Promise<void>((resolve, reject) => {
-      this.#server?.close((error) => (error ? reject(error) : resolve()));
+      const timer = setTimeout(() => this.#server?.closeAllConnections(), 5000);
+      timer.unref();
+      this.#server?.close((error) => {
+        clearTimeout(timer);
+        error ? reject(error) : resolve();
+      });
     });
     this.#server = undefined;
   }
 
   #mcpContext(): McpServerContext {
-    if (!this.#origin) throw new Error("Gateway origin is unavailable before start");
+    if (!this.#origin)
+      throw new Error("Gateway origin is unavailable before start");
     return {
       core: this.#options.core,
       runtime: this.#options.runtime,
@@ -361,12 +508,57 @@ export class Gateway {
   }
 
   #browserAuth(request: Request, response: Response, next: NextFunction): void {
-    const expected = this.#options.authToken;
-    if (!expected || safeEqual(typeof request.query.token === "string" ? request.query.token : undefined, expected)) {
+    const supplied = request.headers.authorization;
+    if (
+      safeEqual(
+        supplied?.startsWith("Bearer ") ? supplied.slice(7) : undefined,
+        this.#options.authToken!,
+      )
+    ) {
       next();
       return;
     }
+    if (request.path === "/app") {
+      response.type("html").send(loginPage);
+      return;
+    }
     response.status(401).json({ error: "Unauthorized" });
+  }
+
+  #accessStatus(request: http.IncomingMessage): number | undefined {
+    const address = this.#server?.address();
+    const port =
+      address && typeof address !== "string"
+        ? address.port
+        : this.#options.port;
+    const scheme = this.#options.tls ? "https" : "http";
+    const origins = new Set(
+      ["127.0.0.1", "localhost", "[::1]"].map(
+        (host) => new URL(`${scheme}://${host}:${port}`).origin,
+      ),
+    );
+    for (const value of [this.#options.publicUrl, this.#origin])
+      if (value) origins.add(new URL(value).origin);
+    const hosts = new Set([...origins].map((origin) => new URL(origin).host));
+    const rawHost = request.headers.host ?? "";
+    if (!/^(\[[a-fA-F0-9:]+\]|[a-zA-Z0-9.-]+)(:[0-9]{1,5})?$/.test(rawHost))
+      return 421;
+    // Compare authorities without trusting forwarded Host headers.
+    if (!hosts.has(rawHost.toLowerCase())) return 421;
+    const origin = request.headers.origin;
+    if (!origin) return;
+    if (origins.has(origin)) return;
+    const pathname = new URL(request.url ?? "/", "http://localhost").pathname;
+    const base = this.#options.runtime.basePath.replace(/\/$/, "");
+    // Opaque Apps may use only the unguessable IDE capability or token-protected stream.
+    if (
+      origin === "null" &&
+      (pathname === base ||
+        pathname.startsWith(base + "/") ||
+        pathname === "/stream")
+    )
+      return;
+    return 403;
   }
 }
 
@@ -391,5 +583,7 @@ function loopbackListenerOrigin(address: AddressInfo): string {
 }
 
 function escapeInlineJson(value: unknown): string {
-  return JSON.stringify(value).replace(/</g, "\\u003c").replace(/>/g, "\\u003e");
+  return JSON.stringify(value)
+    .replace(/</g, "\\u003c")
+    .replace(/>/g, "\\u003e");
 }

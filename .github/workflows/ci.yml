@@ -14,15 +14,20 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
+        node: [22, 24]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with:
-          node-version: 22
+          node-version: ${{ matrix.node }}
           cache: npm
       - run: npm ci
       - run: npm run check
+        env:
+          MCP_VSCODE_REQUIRE_PTY: "1"
+      - run: node scripts/verify-protocol.mjs
+      - run: npm audit --omit=dev --audit-level=high
 
   runtime-package:
     runs-on: ubuntu-latest
@@ -34,6 +39,27 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run package:standalone -- linux-x64
+      - run: npm run test:runtime
+        env:
+          MCP_VSCODE_REAL_RUNTIME_ROOT: ${{ github.workspace }}/runtime/openvscode-server
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:browser
+      - name: Execute actual standalone bundle in both protocol eras
+        run: |
+          version=$(node -p "require('./package.json').version")
+          bundle="$PWD/standalone/mcp-vscode-$version-linux-x64"
+          MCP_VSCODE_REAL_RUNTIME_ROOT="$bundle/runtime/openvscode-server" "$bundle/runtime/openvscode-server/node" scripts/verify-protocol.mjs "$bundle/app/dist/cli.js"
+      - name: Verify installed production tarball
+        run: |
+          package=$(npm pack --ignore-scripts --silent)
+          tarball="$PWD/$package"
+          gate="$PWD/scripts/verify-protocol.mjs"
+          runtime="$PWD/runtime/openvscode-server"
+          tempdir=$(mktemp -d)
+          cd "$tempdir"
+          npm init -y
+          npm install --omit=dev --ignore-scripts "$tarball"
+          MCP_VSCODE_REAL_RUNTIME_ROOT="$runtime" node "$gate" "$tempdir/node_modules/.bin/mcp-vscode"
       - run: |
           package_version=$(node -p "require('./package.json').version")
           tar -C standalone -czf mcp-vscode-linux-x64.tar.gz mcp-vscode-${package_version}-linux-x64
@@ -49,7 +75,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with:
-          node-version: 22.21.1
+          node-version: 22
           cache: npm
       - run: npm ci
       - run: npm run package:standalone -- win32-x64
@@ -67,3 +93,12 @@ jobs:
       - run: npm run test:runtime
         env:
           MCP_VSCODE_REAL_RUNTIME_ROOT: ${{ github.workspace }}\runtime\openvscode-server
+
+      - name: Execute actual Windows standalone bundle in both protocol eras
+        shell: pwsh
+        run: |
+          $packageVersion = node -p "require('./package.json').version"
+          $bundle = Join-Path $PWD "standalone/mcp-vscode-$packageVersion-win32-x64"
+          $env:MCP_VSCODE_REAL_RUNTIME_ROOT = Join-Path $bundle 'runtime/openvscode-server'
+          & (Join-Path $env:MCP_VSCODE_REAL_RUNTIME_ROOT 'node.exe') scripts/verify-protocol.mjs (Join-Path $bundle 'app/dist/cli.js')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

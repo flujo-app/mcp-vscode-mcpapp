@@ -74,7 +74,7 @@
     "@types/express": "5.0.6",
     "@types/http-proxy": "1.17.17",
     "@types/node": "^22.0.0",
-    "@types/vscode": "1.125.0",
+    "@types/vscode": "1.134.0",
     "@types/ws": "8.18.1",
     "esbuild": "0.28.1",
     "semver": "7.8.5",
